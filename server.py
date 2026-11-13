@@ -1,0 +1,1328 @@
+#!/usr/bin/env python3
+"""UPSMRT Social Studio - local server.
+
+Zero dependencies: runs on the Python 3 that ships with macOS.
+    python3 server.py            -> http://localhost:8787
+
+Everything (posts, brand kit, uploads, channel tokens) is stored in ./data
+on this computer. The scheduler publishes due posts while this is running.
+"""
+import base64
+import json
+import mimetypes
+import os
+import re
+import secrets as pysecrets
+import sys
+import threading
+import time
+import traceback
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
+APP_DIR = os.path.join(ROOT, "app")
+DATA_DIR = os.path.join(ROOT, "data")
+UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
+DB_FILE = os.path.join(DATA_DIR, "db.json")
+SECRETS_FILE = os.path.join(DATA_DIR, "secrets.json")
+PORT = int(os.environ.get("PORT", "8787"))
+BASE_URL = "http://localhost:%d" % PORT
+UA = "Mozilla/5.0 (compatible; SocialStudio/1.0)"
+AI_MODEL = "claude-opus-5-5"
+MAX_UPLOAD = 600 * 1024 * 1024
+LATE_LIMIT_HOURS = 6
+
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+LOCK = threading.RLock()
+
+DEFAULT_DB = {
+    "brand": {
+        "name": "UPSMRT",
+        "tagline": "consultancy redefined",
+        "website": "",
+        "language": "en",
+        "voice": "",
+        "audience": "",
+        "hashtags": "",
+        "guidelinesText": "",
+        "colors": {"primary": "#1A1B4E", "accent": "#EEB21E", "light": "#FFFFFF", "text": "#1A1B4E"},
+        "font": "Avenir Next",
+        "logoId": "",
+        "site": None,
+    },
+    "posts": [],
+    "assets": [],
+    "settings": {
+        "holidayRegions": {"federal": True, "quebec": False, "provincial": False},
+        "defaultTime": "09:00",
+        "publicMediaUrl": "",
+        "keyDates": {"cats": {"canada": True, "us": False, "awareness": True, "industry": True,
+                              "tradeshow": True, "publication": True},
+                     "custom": [], "overrides": {}},
+    },
+}
+
+
+def now_iso():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def load_json(path, default):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return json.loads(json.dumps(default))
+
+
+def save_json(path, data, private=False):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=1, ensure_ascii=False)
+    if private:
+        os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+DB = load_json(DB_FILE, DEFAULT_DB)
+for _k, _v in DEFAULT_DB.items():
+    DB.setdefault(_k, json.loads(json.dumps(_v)))
+for _k, _v in DEFAULT_DB["settings"].items():
+    DB["settings"].setdefault(_k, _v)
+SECRETS = load_json(SECRETS_FILE, {"ai_key": "", "channels": {}})
+SECRETS.setdefault("channels", {})
+OAUTH_STATES = {}
+
+
+def save_db():
+    with LOCK:
+        save_json(DB_FILE, DB)
+
+
+def save_secrets():
+    with LOCK:
+        save_json(SECRETS_FILE, SECRETS, private=True)
+
+
+def chan(name):
+    return SECRETS["channels"].setdefault(name, {})
+
+
+class ApiError(Exception):
+    def __init__(self, message, status=400):
+        Exception.__init__(self, message)
+        self.status = status
+
+
+# ----------------------------------------------------------------- HTTP client
+
+def http(method, url, headers=None, data=None, timeout=90):
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("User-Agent", UA)
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, dict(r.headers), r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers), e.read()
+    except urllib.error.URLError as e:
+        raise ApiError("Network error reaching %s: %s" % (urllib.parse.urlparse(url).netloc, e.reason), 502)
+    except (OSError, ValueError) as e:
+        raise ApiError("Network error reaching %s: %s" % (urllib.parse.urlparse(url).netloc, e), 502)
+
+
+def http_json(method, url, headers=None, body=None, form=None, timeout=90):
+    headers = dict(headers or {})
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers.setdefault("Content-Type", "application/json")
+    elif form is not None:
+        data = urllib.parse.urlencode(form).encode("utf-8")
+        headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
+    status, rh, raw = http(method, url, headers, data, timeout)
+    try:
+        parsed = json.loads(raw.decode("utf-8")) if raw else {}
+    except ValueError:
+        parsed = {"raw": raw[:500].decode("utf-8", "replace")}
+    return status, rh, parsed
+
+
+def api_error_text(parsed):
+    if isinstance(parsed, dict):
+        err = parsed.get("error")
+        if isinstance(err, dict):
+            return err.get("message") or err.get("status") or json.dumps(err)[:300]
+        if err:
+            return "%s %s" % (err, parsed.get("error_description", ""))
+        return parsed.get("message") or parsed.get("raw") or json.dumps(parsed)[:300]
+    return str(parsed)[:300]
+
+
+def multipart(fields, file_field, filename, mime, content):
+    boundary = "----studio" + uuid.uuid4().hex
+    out = []
+    for k, v in fields.items():
+        out.append(("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n" % (boundary, k, v)).encode("utf-8"))
+    out.append(("--%s\r\nContent-Disposition: form-data; name=\"%s\"; filename=\"%s\"\r\nContent-Type: %s\r\n\r\n" % (
+        boundary, file_field, filename, mime)).encode("utf-8"))
+    out.append(content)
+    out.append(("\r\n--%s--\r\n" % boundary).encode("utf-8"))
+    return b"".join(out), "multipart/form-data; boundary=" + boundary
+
+
+# ------------------------------------------------------------- Website scanner
+
+class PageParser(HTMLParser):
+    SKIP = {"script", "style", "noscript", "svg", "nav", "footer", "form"}
+
+    def __init__(self, base):
+        HTMLParser.__init__(self, convert_charrefs=True)
+        self.base = base
+        self.title = ""
+        self.description = ""
+        self.og_image = ""
+        self.theme = ""
+        self.headings = []
+        self.paragraphs = []
+        self.images = []
+        self.links = []
+        self.styles = []
+        self._stack = []
+        self._buf = None
+        self._skip = 0
+
+    def handle_starttag(self, tag, attrs):
+        a = dict((k, v or "") for k, v in attrs)
+        if tag in self.SKIP:
+            self._skip += 1
+        if tag == "meta":
+            key = (a.get("name") or a.get("property") or "").lower()
+            if key in ("description", "og:description") and not self.description:
+                self.description = a.get("content", "").strip()
+            elif key == "og:image" and a.get("content"):
+                self.og_image = urllib.parse.urljoin(self.base, a["content"])
+            elif key == "theme-color":
+                self.theme = a.get("content", "")
+        elif tag == "link" and "stylesheet" in a.get("rel", "") and a.get("href"):
+            self.styles.append(urllib.parse.urljoin(self.base, a["href"]))
+        elif tag == "img":
+            src = a.get("src") or a.get("data-src") or ""
+            if not src and a.get("srcset"):
+                src = a["srcset"].split(",")[0].strip().split(" ")[0]
+            if src and not src.startswith("data:"):
+                self.images.append({"url": urllib.parse.urljoin(self.base, src), "alt": a.get("alt", "")})
+        elif tag == "a" and a.get("href"):
+            self.links.append(urllib.parse.urljoin(self.base, a["href"]).split("#")[0])
+        if tag in ("title", "h1", "h2", "h3", "p", "li") and self._buf is None:
+            self._buf = []
+            self._stack.append(tag)
+
+    def handle_endtag(self, tag):
+        if tag in self.SKIP and self._skip:
+            self._skip -= 1
+        if self._stack and self._stack[-1] == tag and self._buf is not None:
+            text = re.sub(r"\s+", " ", "".join(self._buf)).strip()
+            self._stack.pop()
+            self._buf = None
+            if not text:
+                return
+            if tag == "title":
+                self.title = text
+            elif tag in ("h1", "h2", "h3"):
+                if len(text) < 160:
+                    self.headings.append(text)
+            elif len(text) >= 60 and len(text) < 900:
+                self.paragraphs.append(text)
+
+    def handle_data(self, data):
+        if self._buf is not None and (not self._skip or (self._stack and self._stack[-1] == "title")):
+            self._buf.append(data)
+
+
+def fetch_page(url):
+    status, headers, raw = http("GET", url, {"Accept": "text/html,*/*"}, timeout=15)
+    if status >= 400:
+        raise ApiError("%s answered with HTTP %s" % (url, status), 502)
+    ctype = headers.get("Content-Type", "")
+    if "html" not in ctype and ctype:
+        raise ApiError("%s is not a web page (%s)" % (url, ctype), 400)
+    m = re.search(r"charset=([\w-]+)", ctype)
+    try:
+        text = raw[:2500000].decode(m.group(1) if m else "utf-8", "replace")
+    except LookupError:
+        text = raw[:2500000].decode("utf-8", "replace")
+    p = PageParser(url)
+    try:
+        p.feed(text)
+    except Exception:
+        pass
+    return p
+
+
+def dedupe(items, limit):
+    seen, out = set(), []
+    for it in items:
+        key = it.lower() if isinstance(it, str) else it.get("url")
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(it)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def scan_site(url):
+    url = url.strip()
+    if not re.match(r"^https?://", url, re.I):
+        url = "https://" + url
+    host = urllib.parse.urlparse(url).netloc.lower()
+    if not host:
+        raise ApiError("That does not look like a website address.")
+    home = fetch_page(url)
+    pages = [{"url": url, "title": home.title, "headings": dedupe(home.headings, 12), "paragraphs": dedupe(home.paragraphs, 12)}]
+    images = list(home.images)
+    if home.og_image:
+        images.insert(0, {"url": home.og_image, "alt": home.title})
+
+    priority = re.compile(r"about|a-propos|apropos|service|solution|expertise|team|equipe|work|projet|project|case|blog|news|nouvelles|contact|approach|approche|offre", re.I)
+    internal = []
+    for link in home.links:
+        pu = urllib.parse.urlparse(link)
+        if pu.scheme not in ("http", "https") or pu.netloc.lower() != host:
+            continue
+        if re.search(r"\.(pdf|jpg|jpeg|png|gif|zip|mp4|svg|webp)$", pu.path, re.I):
+            continue
+        clean = link.rstrip("/")
+        if clean == url.rstrip("/") or clean in internal:
+            continue
+        internal.append(clean)
+    internal.sort(key=lambda l: (0 if priority.search(l) else 1, len(l)))
+    for link in internal[:7]:
+        try:
+            p = fetch_page(link)
+        except ApiError:
+            continue
+        pages.append({"url": link, "title": p.title, "headings": dedupe(p.headings, 10), "paragraphs": dedupe(p.paragraphs, 10)})
+        images.extend(p.images)
+        if p.og_image:
+            images.append({"url": p.og_image, "alt": p.title})
+
+    images = [i for i in images if not re.search(r"\.(svg|gif|ico)(\?|$)|sprite|pixel|icon|logo|avatar|gravatar", i["url"], re.I)]
+    colors = []
+    if home.theme:
+        colors.append(home.theme.upper())
+    for css in home.styles[:3]:
+        try:
+            _s, _h, raw = http("GET", css, timeout=10)
+        except ApiError:
+            continue
+        counts = {}
+        for hx in re.findall(r"#([0-9a-fA-F]{6})\b", raw[:800000].decode("utf-8", "replace")):
+            r, g, b = int(hx[0:2], 16), int(hx[2:4], 16), int(hx[4:6], 16)
+            if max(r, g, b) - min(r, g, b) < 28:
+                continue
+            counts["#" + hx.upper()] = counts.get("#" + hx.upper(), 0) + 1
+        colors.extend(c for c, _n in sorted(counts.items(), key=lambda kv: -kv[1])[:5])
+    return {
+        "url": url,
+        "scannedAt": now_iso(),
+        "title": home.title,
+        "description": home.description,
+        "pages": pages,
+        "images": dedupe(images, 40),
+        "colors": dedupe(colors, 8),
+    }
+
+
+def site_digest(limit=9000):
+    site = DB["brand"].get("site")
+    if not site:
+        return ""
+    out = ["Website: %s" % site.get("url", ""), "Title: %s" % site.get("title", ""), "Description: %s" % site.get("description", "")]
+    for page in site.get("pages", []):
+        out.append("\n## %s (%s)" % (page.get("title") or "Page", page.get("url")))
+        out.extend("- " + h for h in page.get("headings", []))
+        out.extend(page.get("paragraphs", []))
+    return "\n".join(out)[:limit]
+
+
+# ------------------------------------------------------------------ Generation
+
+CHANNEL_RULES = {
+    "facebook": "Facebook: conversational, 1-3 short paragraphs, 1-3 hashtags at most.",
+    "instagram": "Instagram: strong first line, short paragraphs, 5-10 relevant hashtags at the end.",
+    "linkedin": "LinkedIn: professional and insightful, 3-6 short lines, a clear takeaway, 3 hashtags.",
+    "youtube": "YouTube: 'youtubeTitle' under 90 characters, description of 2-4 sentences with a call to action.",
+}
+
+
+def claude(prompt, with_guidelines=True):
+    key = SECRETS.get("ai_key") or os.environ.get("ANTHROPIC_API_KEY", "")
+    if not key:
+        raise ApiError("No AI key configured.", 409)
+    content = []
+    if with_guidelines:
+        for a in DB["assets"]:
+            if a.get("kind") == "guideline" and a.get("mime") == "application/pdf" and a.get("size", 0) < 12 * 1024 * 1024:
+                try:
+                    with open(os.path.join(UPLOAD_DIR, a["file"]), "rb") as f:
+                        content.append({"type": "document", "source": {
+                            "type": "base64", "media_type": "application/pdf",
+                            "data": base64.b64encode(f.read()).decode("ascii")}})
+                except OSError:
+                    pass
+                if len(content) >= 2:
+                    break
+    content.append({"type": "text", "text": prompt})
+    body = {"model": AI_MODEL, "max_tokens": 16000, "fallbacks": "default",
+            "messages": [{"role": "user", "content": content}]}
+    headers = {"x-api-key": key, "anthropic-version": "2026-10-21",
+               "anthropic-beta": "server-side-fallback-2026-07-01"}
+    status, _h, parsed = http_json("POST", "https://api.anthropic.com/v1/messages", headers, body, timeout=240)
+    if status == 400 and "fallback" in api_error_text(parsed).lower():
+        body.pop("fallbacks")
+        headers.pop("anthropic-beta")
+        status, _h, parsed = http_json("POST", "https://api.anthropic.com/v1/messages", headers, body, timeout=240)
+    if status == 401:
+        raise ApiError("The Anthropic API key was rejected. Check it in Settings.", 401)
+    if status == 429:
+        raise ApiError("The AI service is rate limiting requests. Try again in a minute.", 429)
+    if status >= 400:
+        raise ApiError("AI request failed (%s): %s" % (status, api_error_text(parsed)), 502)
+    if parsed.get("stop_reason") == "refusal":
+        raise ApiError("The AI declined this request. Try rephrasing the topic.", 422)
+    text = "".join(b.get("text", "") for b in parsed.get("content", []) if b.get("type") == "text")
+    m = re.search(r"\{.*\}", text, re.S)
+    if not m:
+        raise ApiError("The AI answer could not be read. Try again.", 502)
+    try:
+        return json.loads(m.group(0))
+    except ValueError:
+        raise ApiError("The AI answer could not be read. Try again.", 502)
+
+
+def brand_brief():
+    b = DB["brand"]
+    lang = {"en": "English", "fr": "French (Canadian)", "bilingual": "bilingual: French first, then English"}.get(b.get("language"), "English")
+    parts = [
+        "Brand: %s" % b.get("name", ""),
+        "Tagline: %s" % b.get("tagline", ""),
+        "Write in: %s. Audience is in Canada; use Canadian spelling." % lang,
+        "Voice and tone: %s" % (b.get("voice") or "confident, clear, human, no hype"),
+        "Audience: %s" % (b.get("audience") or "not specified"),
+        "Preferred hashtags: %s" % (b.get("hashtags") or "none given"),
+    ]
+    if b.get("guidelinesText"):
+        parts.append("Brand guidelines:\n" + b["guidelinesText"][:6000])
+    digest = site_digest()
+    if digest:
+        parts.append("Source material from the brand website (the only source of facts - do not invent services, numbers, clients or claims):\n" + digest)
+    else:
+        parts.append("No website content is available; keep claims generic and do not invent facts.")
+    return "\n".join(parts)
+
+
+def generate(req):
+    kind = req.get("type", "post")
+    channels = req.get("channels") or ["facebook", "instagram", "linkedin"]
+    topic = (req.get("topic") or "").strip()
+    tone = req.get("tone") or ""
+    rules = "\n".join(CHANNEL_RULES[c] for c in channels if c in CHANNEL_RULES)
+    try:
+        if kind == "plan":
+            prompt = (
+                "%s\n\nTask: plan %d social media posts for %s. Spread them across these dates/slots and themes:\n%s\n\n"
+                "Channel rules:\n%s\n\nReturn ONLY JSON: {\"posts\":[{\"date\":\"YYYY-MM-DD\",\"topic\":\"...\","
+                "\"captions\":{%s},\"youtubeTitle\":\"...\",\"headline\":\"max 8 words for the visual\",\"subline\":\"max 14 words\"}]}"
+            ) % (brand_brief(), len(req.get("slots", [])), req.get("month", "the month"),
+                 json.dumps(req.get("slots", []), ensure_ascii=False), rules,
+                 ",".join('"%s":"..."' % c for c in channels))
+            out = claude(prompt)
+            out["source"] = "ai"
+            return out
+        if kind == "reel":
+            prompt = (
+                "%s\n\nTask: script a %d-scene vertical reel about: %s. %s\nEach scene is on screen about 3 seconds, so text must be very short.\n"
+                "Return ONLY JSON: {\"title\":\"...\",\"scenes\":[{\"headline\":\"max 6 words\",\"subline\":\"max 12 words\"}],"
+                "\"cta\":\"max 5 words\",\"caption\":\"caption for the reel with hashtags\"}"
+            ) % (brand_brief(), int(req.get("scenes", 4)), topic or "what the brand does and why it matters", tone)
+            out = claude(prompt)
+            out["source"] = "ai"
+            return out
+        prompt = (
+            "%s\n\nTask: write one social media post about: %s. %s\nChannel rules:\n%s\n\n"
+            "Return ONLY JSON: {\"captions\":{%s},\"youtubeTitle\":\"...\",\"headline\":\"max 8 words for the visual\","
+            "\"subline\":\"max 14 words\",\"cta\":\"max 4 words\"}"
+        ) % (brand_brief(), topic or "a key message from the website", ("Tone: " + tone) if tone else "", rules,
+             ",".join('"%s":"..."' % c for c in channels))
+        out = claude(prompt)
+        out["source"] = "ai"
+        return out
+    except ApiError as e:
+        if e.status != 409:
+            raise
+    return template_generate(kind, req, channels, topic)
+
+
+KEYDATE_CATS = ("awareness", "industry", "tradeshow", "publication")
+ISO_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def suggest_key_dates(req):
+    """Ask Claude for further industry dates. Every result is flagged for the user to confirm."""
+    industry = (req.get("industry") or "").strip()[:120] or "general business"
+    start, end = str(req.get("from", ""))[:10], str(req.get("to", ""))[:10]
+    if not (ISO_DAY.match(start) and ISO_DAY.match(end)):
+        raise ApiError("Choose a period first.", 400)
+    known = [str(n)[:80] for n in (req.get("known") or [])][:150]
+    b = DB["brand"]
+    prompt = (
+        "Brand: %s (%s). Audience is in Canada, with clients in the United States.\n"
+        "Task: list up to 15 real, well-known dates between %s and %s that a company in this field would post about on social media: %s.\n"
+        "Categories: 'industry' (conferences, summits, sector deadlines), 'tradeshow' (trade shows and expos), "
+        "'publication' (major annual reports, rankings and publication releases), 'awareness' (awareness days and weeks).\n"
+        "Rules: only include events you are confident exist. Never invent an event. If you do not know the exact date for that year, "
+        "give your best estimate from its usual timing and say so in 'when' (for example 'Usually mid-May'). Skip these, already listed: %s.\n"
+        "For each, write a short publishable key message in the brand's voice (no invented facts about the brand, Canadian spelling), "
+        "a headline of at most 6 words and a subline of at most 9 words for the visual.\n"
+        "Return ONLY JSON: {\"dates\":[{\"date\":\"YYYY-MM-DD\",\"name\":\"...\",\"category\":\"industry|tradeshow|publication|awareness\","
+        "\"where\":\"city or empty\",\"when\":\"usual timing\",\"message\":\"...\",\"headline\":\"...\",\"subline\":\"...\"}]}"
+    ) % (b.get("name", ""), b.get("tagline", ""), start, end, industry, json.dumps(known, ensure_ascii=False))
+    out = claude(prompt, with_guidelines=False)
+    dates = []
+    for i, d in enumerate(out.get("dates") or []):
+        if not isinstance(d, dict):
+            continue
+        date, name = str(d.get("date", ""))[:10], str(d.get("name", "")).strip()[:120]
+        if not ISO_DAY.match(date) or not name or not (start <= date <= end):
+            continue
+        cat = d.get("category") if d.get("category") in KEYDATE_CATS else "industry"
+        dates.append({"id": "ai%x%d" % (int(time.time() * 1000), i), "date": date, "name": name, "cat": cat,
+                      "source": "ai", "approx": True,
+                      "where": str(d.get("where", ""))[:80], "when": str(d.get("when", ""))[:80] or "Suggested by AI",
+                      "msg": str(d.get("message", ""))[:600], "head": str(d.get("headline", ""))[:60],
+                      "sub": str(d.get("subline", ""))[:90]})
+    return {"dates": dates}
+
+
+def site_snippets():
+    site = DB["brand"].get("site") or {}
+    heads, paras = [], []
+    for page in site.get("pages", []):
+        heads.extend(page.get("headings", []))
+        paras.extend(page.get("paragraphs", []))
+    return dedupe(heads, 30), dedupe(paras, 30), site
+
+
+def first_sentences(text, n=2, limit=260):
+    parts = re.split(r"(?<=[.!?])\s+", text)
+    out = " ".join(parts[:n])
+    return out if len(out) <= limit else out[:limit].rsplit(" ", 1)[0] + "…"
+
+
+def template_post(topic, channels, index=0):
+    b = DB["brand"]
+    fr = b.get("language") == "fr"
+    heads, paras, site = site_snippets()
+    name = b.get("name") or "We"
+    tags = b.get("hashtags") or ""
+    url = site.get("url", b.get("website", ""))
+    if topic:
+        words = [w for w in re.findall(r"\w{4,}", topic.lower())]
+        match = [p for p in paras if any(w in p.lower() for w in words)]
+        body = first_sentences(match[0]) if match else (first_sentences(paras[index % len(paras)]) if paras else "")
+        headline = topic[:70]
+    else:
+        headline = heads[index % len(heads)] if heads else (b.get("tagline") or name)
+        body = first_sentences(paras[index % len(paras)]) if paras else (site.get("description") or "")
+    more = ("En savoir plus : " if fr else "Learn more: ") + url if url else ""
+    base = "\n\n".join(x for x in [headline, body, more] if x)
+    caps = {}
+    for c in channels:
+        if c == "instagram":
+            caps[c] = "\n\n".join(x for x in [headline, body, ("Lien dans la bio." if fr else "Link in bio."), tags] if x)
+        elif c == "linkedin":
+            caps[c] = "\n\n".join(x for x in [headline, body, more, tags] if x)
+        else:
+            caps[c] = base
+    return {"topic": topic or headline, "captions": caps, "youtubeTitle": headline[:90],
+            "headline": headline[:60], "subline": first_sentences(body, 1, 90), "cta": "En savoir plus" if fr else "Learn more"}
+
+
+def template_generate(kind, req, channels, topic):
+    b = DB["brand"]
+    fr = b.get("language") == "fr"
+    if kind == "plan":
+        posts = []
+        for i, slot in enumerate(req.get("slots", [])):
+            if slot.get("holiday"):
+                h = slot["holiday"]
+                if slot.get("solemn"):
+                    greet = ("%s : aujourd'hui, nous prenons un moment pour nous souvenir et réfléchir." if fr else "%s. Today we pause to remember and reflect.") % h
+                else:
+                    greet = ("Toute l'équipe de %s vous souhaite une belle journée : %s." if fr else "From all of us at %s - wishing you a wonderful %s.") % (b.get("name", ""), h)
+                p = {"topic": h, "captions": dict((c, greet + ("\n\n" + b["hashtags"] if b.get("hashtags") and c != "facebook" else "")) for c in channels),
+                     "youtubeTitle": h, "headline": h, "subline": b.get("name", "")}
+            else:
+                p = template_post("", channels, i)
+            p["date"] = slot.get("date")
+            posts.append(p)
+        return {"posts": posts, "source": "template"}
+    if kind == "reel":
+        heads, paras, _site = site_snippets()
+        n = int(req.get("scenes", 4))
+        scenes = [{"headline": topic[:40] or b.get("name", ""), "subline": b.get("tagline", "")}]
+        for i in range(max(0, n - 1)):
+            h = heads[i] if i < len(heads) else ""
+            s = first_sentences(paras[i], 1, 80) if i < len(paras) else ""
+            if h or s:
+                scenes.append({"headline": h[:40], "subline": s})
+        return {"title": topic or b.get("name", ""), "scenes": scenes, "cta": "En savoir plus" if fr else "Learn more",
+                "caption": template_post(topic, ["instagram"])["captions"]["instagram"], "source": "template"}
+    out = template_post(topic, channels)
+    out["source"] = "template"
+    return out
+
+
+# ------------------------------------------------------------------ Publishers
+
+def asset_by_id(aid):
+    for a in DB["assets"]:
+        if a["id"] == aid:
+            return a
+    return None
+
+
+def read_asset(a):
+    with open(os.path.join(UPLOAD_DIR, a["file"]), "rb") as f:
+        return f.read()
+
+
+def need(cfg, *keys):
+    for k in keys:
+        if not cfg.get(k):
+            raise ApiError("Channel is not connected.")
+
+
+def publish_facebook(post, caption, media):
+    c = chan("facebook")
+    need(c, "page_id", "page_token")
+    token, page = c["page_token"], c["page_id"]
+    if media and media["mime"].startswith("video"):
+        data, ctype = multipart({"access_token": token, "description": caption, "title": post.get("title") or ""},
+                                "source", media["file"], media["mime"], read_asset(media))
+        status, _h, raw = http("POST", "https://graph-video.facebook.com/%s/videos" % page, {"Content-Type": ctype}, data, timeout=900)
+    elif media:
+        data, ctype = multipart({"access_token": token, "caption": caption}, "source", media["file"], media["mime"], read_asset(media))
+        status, _h, raw = http("POST", "https://graph.facebook.com/%s/photos" % page, {"Content-Type": ctype}, data, timeout=300)
+    else:
+        status, _h, raw = http("POST", "https://graph.facebook.com/%s/feed" % page, {"Content-Type": "application/x-www-form-urlencoded"},
+                               urllib.parse.urlencode({"access_token": token, "message": caption}).encode("utf-8"))
+    parsed = json.loads(raw.decode("utf-8", "replace") or "{}")
+    if status >= 400:
+        raise ApiError(api_error_text(parsed))
+    pid = parsed.get("post_id") or parsed.get("id", "")
+    return {"id": pid, "url": "https://www.facebook.com/%s" % pid}
+
+
+def publish_instagram(post, caption, media):
+    c = chan("instagram")
+    need(c, "ig_user_id", "token")
+    if not media:
+        raise ApiError("Instagram needs an image or a video.")
+    ig, token = c["ig_user_id"], c["token"]
+    g = "https://graph.facebook.com/"
+    if media["mime"].startswith("video"):
+        status, _h, parsed = http_json("POST", g + ig + "/media", form={
+            "media_type": "REELS", "upload_type": "resumable", "caption": caption, "access_token": token})
+        if status >= 400:
+            raise ApiError(api_error_text(parsed))
+        container = parsed["id"]
+        blob = read_asset(media)
+        status, _h, raw = http("POST", parsed.get("uri") or "https://rupload.facebook.com/ig-api-upload/%s" % container,
+                               {"Authorization": "OAuth " + token, "offset": "0", "file_size": str(len(blob)),
+                                "Content-Type": "application/octet-stream"}, blob, timeout=900)
+        if status >= 400:
+            raise ApiError("Upload failed: " + raw[:300].decode("utf-8", "replace"))
+    else:
+        base = (DB["settings"].get("publicMediaUrl") or "").rstrip("/")
+        if not base:
+            raise ApiError("Instagram only accepts images from a public web address. Add a Public media URL in Settings, or post this image manually.")
+        status, _h, parsed = http_json("POST", g + ig + "/media", form={
+            "image_url": base + "/" + media["file"], "caption": caption, "access_token": token})
+        if status >= 400:
+            raise ApiError(api_error_text(parsed))
+        container = parsed["id"]
+    for _ in range(60):
+        status, _h, parsed = http_json("GET", g + container + "?fields=status_code&access_token=" + urllib.parse.quote(token))
+        code = parsed.get("status_code")
+        if code == "FINISHED":
+            break
+        if code in ("ERROR", "EXPIRED"):
+            raise ApiError("Instagram could not process the media (%s)." % code)
+        time.sleep(5)
+    status, _h, parsed = http_json("POST", g + ig + "/media_publish", form={"creation_id": container, "access_token": token})
+    if status >= 400:
+        raise ApiError(api_error_text(parsed))
+    return {"id": parsed.get("id", ""), "url": "https://www.instagram.com/%s/" % c.get("username", "")}
+
+
+def li_headers(token):
+    d = datetime.now(timezone.utc).replace(day=1) - timedelta(days=40)
+    return {"Authorization": "Bearer " + token, "LinkedIn-Version": d.strftime("%Y%m"), "X-Restli-Protocol-Version": "2.0.0"}
+
+
+def publish_linkedin(post, caption, media):
+    c = chan("linkedin")
+    need(c, "access_token", "author_urn")
+    h, owner = li_headers(c["access_token"]), c["author_urn"]
+    api = "https://api.linkedin.com/rest/"
+    body = {"author": owner, "commentary": caption, "visibility": "PUBLIC", "lifecycleState": "PUBLISHED",
+            "isReshareDisabledByAuthor": False,
+            "distribution": {"feedDistribution": "MAIN_FEED", "targetEntities": [], "thirdPartyDistributionChannels": []}}
+    if media and media["mime"].startswith("image"):
+        status, _h, parsed = http_json("POST", api + "images?action=initializeUpload", h, {"initializeUploadRequest": {"owner": owner}})
+        if status >= 400:
+            raise ApiError(api_error_text(parsed))
+        status, _h, raw = http("PUT", parsed["value"]["uploadUrl"], {"Authorization": h["Authorization"]}, read_asset(media), timeout=300)
+        if status >= 400:
+            raise ApiError("Image upload failed (%s)." % status)
+        body["content"] = {"media": {"id": parsed["value"]["image"]}}
+    elif media:
+        blob = read_asset(media)
+        status, _h, parsed = http_json("POST", api + "videos?action=initializeUpload", h, {"initializeUploadRequest": {
+            "owner": owner, "fileSizeBytes": len(blob), "uploadCaptions": False, "uploadThumbnail": False}})
+        if status >= 400:
+            raise ApiError(api_error_text(parsed))
+        v = parsed["value"]
+        etags = []
+        for part in v["uploadInstructions"]:
+            status, rh, raw = http("PUT", part["uploadUrl"], {"Content-Type": "application/octet-stream"},
+                                   blob[part["firstByte"]:part["lastByte"] + 1], timeout=900)
+            if status >= 400:
+                raise ApiError("Video upload failed (%s)." % status)
+            etags.append((rh.get("ETag") or rh.get("etag") or "").strip('"'))
+        status, _h, parsed = http_json("POST", api + "videos?action=finalizeUpload", h, {"finalizeUploadRequest": {
+            "video": v["video"], "uploadToken": v.get("uploadToken", ""), "uploadedPartIds": etags}})
+        if status >= 400:
+            raise ApiError(api_error_text(parsed))
+        body["content"] = {"media": {"id": v["video"], "title": post.get("title") or "Video"}}
+    status, rh, parsed = http_json("POST", api + "posts", h, body)
+    if status >= 400:
+        raise ApiError(api_error_text(parsed))
+    urn = rh.get("x-restli-id") or rh.get("X-RestLi-Id") or ""
+    return {"id": urn, "url": ("https://www.linkedin.com/feed/update/%s/" % urn) if urn else ""}
+
+
+def youtube_token():
+    c = chan("youtube")
+    need(c, "client_id", "client_secret", "refresh_token")
+    status, _h, parsed = http_json("POST", "https://oauth2.googleapis.com/token", form={
+        "client_id": c["client_id"], "client_secret": c["client_secret"],
+        "refresh_token": c["refresh_token"], "grant_type": "refresh_token"})
+    if status >= 400:
+        raise ApiError("Google sign-in expired: " + api_error_text(parsed))
+    return parsed["access_token"]
+
+
+def publish_youtube(post, caption, media):
+    if not media or not media["mime"].startswith("video"):
+        raise ApiError("YouTube needs a video.")
+    token = youtube_token()
+    blob = read_asset(media)
+    meta = {"snippet": {"title": (post.get("title") or caption.split("\n")[0] or "Video")[:100], "description": caption[:4900], "categoryId": "22"},
+            "status": {"privacyStatus": post.get("privacy") or "public", "selfDeclaredMadeForKids": False}}
+    status, rh, raw = http("POST", "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status",
+                           {"Authorization": "Bearer " + token, "Content-Type": "application/json; charset=UTF-8",
+                            "X-Upload-Content-Type": media["mime"], "X-Upload-Content-Length": str(len(blob))},
+                           json.dumps(meta).encode("utf-8"))
+    loc = rh.get("Location") or rh.get("location")
+    if status >= 400 or not loc:
+        raise ApiError("YouTube refused the upload: " + raw[:300].decode("utf-8", "replace"))
+    status, _h, raw = http("PUT", loc, {"Authorization": "Bearer " + token, "Content-Type": media["mime"]}, blob, timeout=1800)
+    parsed = json.loads(raw.decode("utf-8", "replace") or "{}")
+    if status >= 400:
+        raise ApiError(api_error_text(parsed))
+    return {"id": parsed.get("id", ""), "url": "https://youtu.be/%s" % parsed.get("id", "")}
+
+
+PUBLISHERS = {"facebook": publish_facebook, "instagram": publish_instagram, "linkedin": publish_linkedin, "youtube": publish_youtube}
+
+
+def publish_post(post_id, only_failed=False):
+    with LOCK:
+        post = next((p for p in DB["posts"] if p["id"] == post_id), None)
+        if not post or post.get("status") == "publishing":
+            return post
+        post["status"] = "publishing"
+        post.setdefault("results", {})
+        save_db()
+    media = asset_by_id((post.get("mediaIds") or [None])[0]) if post.get("mediaIds") else None
+    for ch in post.get("channels", []):
+        if only_failed and post["results"].get(ch, {}).get("ok"):
+            continue
+        caption = (post.get("captions") or {}).get(ch) or post.get("caption", "")
+        try:
+            res = PUBLISHERS[ch](post, caption, media)
+            res.update({"ok": True, "at": now_iso()})
+        except ApiError as e:
+            res = {"ok": False, "error": str(e), "at": now_iso()}
+        except Exception as e:  # keep the scheduler alive whatever a platform returns
+            traceback.print_exc()
+            res = {"ok": False, "error": "Unexpected error: %s" % e, "at": now_iso()}
+        with LOCK:
+            post["results"][ch] = res
+            save_db()
+    with LOCK:
+        oks = [post["results"].get(ch, {}).get("ok") for ch in post.get("channels", [])]
+        post["status"] = "published" if oks and all(oks) else ("partial" if any(oks) else "failed")
+        if any(oks):
+            post["publishedAt"] = now_iso()
+        save_db()
+    return post
+
+
+def scheduler():
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            due = []
+            with LOCK:
+                for p in DB["posts"]:
+                    if p.get("status") != "scheduled" or not p.get("scheduledAt"):
+                        continue
+                    try:
+                        when = datetime.strptime(p["scheduledAt"][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+                    except ValueError:
+                        continue
+                    if when > now:
+                        continue
+                    if now - when > timedelta(hours=LATE_LIMIT_HOURS):
+                        p["status"] = "missed"
+                        save_db()
+                    else:
+                        due.append(p["id"])
+            for pid in due:
+                publish_post(pid)
+        except Exception:
+            traceback.print_exc()
+        time.sleep(20)
+
+
+# ----------------------------------------------------------------------- OAuth
+
+def oauth_start(platform, origin):
+    state = pysecrets.token_urlsafe(16)
+    OAUTH_STATES[state] = platform
+    redirect = "%s/oauth/callback/%s" % (BASE_URL, platform)
+    if platform == "facebook":
+        c = chan("facebook")
+        need_app(c, "app_id", "app_secret")
+        return "https://www.facebook.com/dialog/oauth?" + urllib.parse.urlencode({
+            "client_id": c["app_id"], "redirect_uri": redirect, "state": state,
+            "scope": "pages_show_list,pages_manage_posts,pages_read_engagement,instagram_basic,instagram_content_publish,business_management"})
+    if platform == "linkedin":
+        c = chan("linkedin")
+        need_app(c, "client_id", "client_secret")
+        scope = "openid profile w_member_social" + (" w_organization_social" if c.get("org_id") else "")
+        return "https://www.linkedin.com/oauth/v2/authorization?" + urllib.parse.urlencode({
+            "response_type": "code", "client_id": c["client_id"], "redirect_uri": redirect, "state": state, "scope": scope})
+    if platform == "youtube":
+        c = chan("youtube")
+        need_app(c, "client_id", "client_secret")
+        return "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode({
+            "client_id": c["client_id"], "redirect_uri": redirect, "response_type": "code", "state": state,
+            "access_type": "offline", "prompt": "consent",
+            "scope": "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly"})
+    raise ApiError("Unknown channel.", 404)
+
+
+def need_app(cfg, *keys):
+    for k in keys:
+        if not cfg.get(k):
+            raise ApiError("Save the app credentials for this channel first.")
+
+
+def select_page(page_id):
+    fb = chan("facebook")
+    page = next((p for p in fb.get("pages", []) if p["id"] == page_id), None)
+    if not page:
+        raise ApiError("Page not found.")
+    fb.update({"page_id": page["id"], "page_name": page["name"], "page_token": page["access_token"]})
+    ig = page.get("instagram_business_account")
+    if ig:
+        chan("instagram").update({"ig_user_id": ig["id"], "username": ig.get("username", ""), "token": page["access_token"]})
+    save_secrets()
+
+
+def oauth_callback(platform, q):
+    if q.get("error"):
+        raise ApiError(q.get("error_description") or q["error"])
+    if OAUTH_STATES.pop(q.get("state", ""), None) != platform or not q.get("code"):
+        raise ApiError("This sign-in link is no longer valid. Start again from the Channels page.")
+    redirect = "%s/oauth/callback/%s" % (BASE_URL, platform)
+    if platform == "facebook":
+        c = chan("facebook")
+        g = "https://graph.facebook.com/"
+        status, _h, tok = http_json("GET", g + "oauth/access_token?" + urllib.parse.urlencode({
+            "client_id": c["app_id"], "client_secret": c["app_secret"], "redirect_uri": redirect, "code": q["code"]}))
+        if status >= 400:
+            raise ApiError(api_error_text(tok))
+        status, _h, long_tok = http_json("GET", g + "oauth/access_token?" + urllib.parse.urlencode({
+            "grant_type": "fb_exchange_token", "client_id": c["app_id"], "client_secret": c["app_secret"],
+            "fb_exchange_token": tok["access_token"]}))
+        user_token = long_tok.get("access_token") or tok["access_token"]
+        status, _h, pages = http_json("GET", g + "me/accounts?" + urllib.parse.urlencode({
+            "fields": "id,name,access_token,instagram_business_account{id,username}", "limit": "100", "access_token": user_token}))
+        if status >= 400:
+            raise ApiError(api_error_text(pages))
+        c["pages"] = pages.get("data", [])
+        if not c["pages"]:
+            raise ApiError("No Facebook Pages were shared with the app. Run the sign-in again and select your Page.")
+        select_page(c["pages"][0]["id"])
+    elif platform == "linkedin":
+        c = chan("linkedin")
+        status, _h, tok = http_json("POST", "https://www.linkedin.com/oauth/v2/accessToken", form={
+            "grant_type": "authorization_code", "code": q["code"], "redirect_uri": redirect,
+            "client_id": c["client_id"], "client_secret": c["client_secret"]})
+        if status >= 400:
+            raise ApiError(api_error_text(tok))
+        c["access_token"] = tok["access_token"]
+        c["expires_at"] = int(time.time()) + int(tok.get("expires_in", 0))
+        status, _h, me = http_json("GET", "https://api.linkedin.com/v2/userinfo", {"Authorization": "Bearer " + tok["access_token"]})
+        if status >= 400:
+            raise ApiError(api_error_text(me))
+        c["name"] = me.get("name", "")
+        c["author_urn"] = ("urn:li:organization:%s" % c["org_id"]) if c.get("org_id") else "urn:li:person:%s" % me.get("sub", "")
+        save_secrets()
+    elif platform == "youtube":
+        c = chan("youtube")
+        status, _h, tok = http_json("POST", "https://oauth2.googleapis.com/token", form={
+            "grant_type": "authorization_code", "code": q["code"], "redirect_uri": redirect,
+            "client_id": c["client_id"], "client_secret": c["client_secret"]})
+        if status >= 400:
+            raise ApiError(api_error_text(tok))
+        if not tok.get("refresh_token"):
+            raise ApiError("Google did not return a refresh token. Remove the app's access in your Google account and connect again.")
+        c["refresh_token"] = tok["refresh_token"]
+        status, _h, ch = http_json("GET", "https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true",
+                                   {"Authorization": "Bearer " + tok["access_token"]})
+        items = ch.get("items") or []
+        c["channel_name"] = items[0]["snippet"]["title"] if items else ""
+        save_secrets()
+
+
+def test_channel(platform):
+    if platform == "facebook":
+        c = chan("facebook")
+        need(c, "page_id", "page_token")
+        status, _h, p = http_json("GET", "https://graph.facebook.com/%s?fields=name&access_token=%s" % (c["page_id"], urllib.parse.quote(c["page_token"])))
+        if status >= 400:
+            raise ApiError(api_error_text(p))
+        c["page_name"] = p.get("name", c.get("page_name", ""))
+    elif platform == "instagram":
+        c = chan("instagram")
+        need(c, "ig_user_id", "token")
+        status, _h, p = http_json("GET", "https://graph.facebook.com/%s?fields=username&access_token=%s" % (c["ig_user_id"], urllib.parse.quote(c["token"])))
+        if status >= 400:
+            raise ApiError(api_error_text(p))
+        c["username"] = p.get("username", "")
+    elif platform == "linkedin":
+        c = chan("linkedin")
+        need(c, "access_token", "author_urn")
+        status, _h, p = http_json("GET", "https://api.linkedin.com/v2/userinfo", {"Authorization": "Bearer " + c["access_token"]})
+        if status >= 400:
+            raise ApiError(api_error_text(p))
+        c["name"] = p.get("name", c.get("name", ""))
+    elif platform == "youtube":
+        token = youtube_token()
+        status, _h, p = http_json("GET", "https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true", {"Authorization": "Bearer " + token})
+        if status >= 400:
+            raise ApiError(api_error_text(p))
+        items = p.get("items") or []
+        chan("youtube")["channel_name"] = items[0]["snippet"]["title"] if items else ""
+    else:
+        raise ApiError("Unknown channel.", 404)
+    save_secrets()
+
+
+CHANNEL_FIELDS = {
+    "facebook": ["app_id", "app_secret", "page_id", "page_token"],
+    "instagram": ["ig_user_id", "token"],
+    "linkedin": ["client_id", "client_secret", "org_id", "access_token", "author_urn"],
+    "youtube": ["client_id", "client_secret", "refresh_token"],
+}
+SECRET_FIELDS = {"app_secret", "page_token", "token", "client_secret", "access_token", "refresh_token"}
+
+
+def public_channels():
+    fb, ig, li, yt = chan("facebook"), chan("instagram"), chan("linkedin"), chan("youtube")
+
+    def view(name, cfg, connected, label, extra=None):
+        v = {"connected": bool(connected), "name": label or "", "fields": {}}
+        for f in CHANNEL_FIELDS[name]:
+            v["fields"][f] = bool(cfg.get(f)) if f in SECRET_FIELDS else cfg.get(f, "")
+        v.update(extra or {})
+        return v
+    return {
+        "facebook": view("facebook", fb, fb.get("page_id") and fb.get("page_token"), fb.get("page_name"),
+                         {"pages": [{"id": p["id"], "name": p["name"]} for p in fb.get("pages", [])]}),
+        "instagram": view("instagram", ig, ig.get("ig_user_id") and ig.get("token"), ig.get("username") and "@" + ig["username"]),
+        "linkedin": view("linkedin", li, li.get("access_token") and li.get("author_urn"), li.get("name"),
+                         {"expiresAt": li.get("expires_at", 0)}),
+        "youtube": view("youtube", yt, yt.get("refresh_token") and yt.get("client_id") and yt.get("client_secret"), yt.get("channel_name")),
+    }
+
+
+def state():
+    with LOCK:
+        return {"brand": DB["brand"], "posts": DB["posts"], "assets": DB["assets"], "settings": DB["settings"],
+                "channels": public_channels(),
+                "ai": {"enabled": bool(SECRETS.get("ai_key") or os.environ.get("ANTHROPIC_API_KEY")), "model": AI_MODEL},
+                "baseUrl": BASE_URL, "serverTime": now_iso()}
+
+
+# --------------------------------------------------------------------- Handler
+
+EXT = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/svg+xml": ".svg", "image/gif": ".gif",
+       "video/mp4": ".mp4", "video/webm": ".webm", "video/quicktime": ".mov", "application/pdf": ".pdf",
+       "text/plain": ".txt", "text/markdown": ".md",
+       "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx"}
+
+
+def add_asset(blob, mime, kind, name, source=""):
+    mime = mime.split(";")[0].strip().lower()
+    if mime not in EXT:
+        raise ApiError("This file type is not supported (%s)." % (mime or "unknown"))
+    aid = uuid.uuid4().hex[:12]
+    fname = aid + EXT[mime]
+    with open(os.path.join(UPLOAD_DIR, fname), "wb") as f:
+        f.write(blob)
+    asset = {"id": aid, "kind": kind, "name": name or fname, "file": fname, "mime": mime, "size": len(blob),
+             "url": "/uploads/" + fname, "createdAt": now_iso(), "source": source}
+    with LOCK:
+        DB["assets"].insert(0, asset)
+        save_db()
+    return asset
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "SocialStudio/1.0"
+
+    def log_message(self, fmt, *args):
+        if "/api/state" not in str(args[0] if args else ""):
+            sys.stderr.write("%s %s\n" % (time.strftime("%H:%M:%S"), fmt % args))
+
+    def send_json(self, obj, status=200):
+        raw = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def body(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        if n > MAX_UPLOAD:
+            raise ApiError("File is too large.", 413)
+        return self.rfile.read(n) if n else b""
+
+    def json_body(self):
+        raw = self.body()
+        try:
+            return json.loads(raw.decode("utf-8")) if raw else {}
+        except ValueError:
+            raise ApiError("Invalid request.")
+
+    def serve_file(self, path, root):
+        full = os.path.realpath(os.path.join(root, path.lstrip("/")))
+        if not full.startswith(os.path.realpath(root) + os.sep) or not os.path.isfile(full):
+            self.send_error(404)
+            return
+        size = os.path.getsize(full)
+        ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
+        if full.endswith(".js"):
+            ctype = "text/javascript"
+        start, end, status = 0, size - 1, 200
+        m = re.match(r"bytes=(\d*)-(\d*)", self.headers.get("Range") or "")
+        if m and (m.group(1) or m.group(2)):
+            if m.group(1):
+                start = int(m.group(1))
+                end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+            else:
+                start = max(0, size - int(m.group(2)))
+            if start > end:
+                self.send_error(416)
+                return
+            status = 206
+        self.send_response(status)
+        self.send_header("Content-Type", ctype + ("; charset=utf-8" if ctype.startswith("text/") else ""))
+        self.send_header("Content-Length", str(end - start + 1))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Cache-Control", "no-cache" if root == APP_DIR else "max-age=86400")
+        if status == 206:
+            self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
+        self.end_headers()
+        with open(full, "rb") as f:
+            f.seek(start)
+            left = end - start + 1
+            while left > 0:
+                chunk = f.read(min(262144, left))
+                if not chunk:
+                    break
+                try:
+                    self.wfile.write(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
+                left -= len(chunk)
+
+    def same_origin(self):
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        return urllib.parse.urlparse(origin).hostname in ("localhost", "127.0.0.1", "::1")
+
+    def handle_any(self, method):
+        parsed = urllib.parse.urlparse(self.path)
+        path = urllib.parse.unquote(parsed.path)
+        q = dict(urllib.parse.parse_qsl(parsed.query))
+        try:
+            if method == "GET" and not path.startswith(("/api/", "/oauth/")):
+                if path.startswith("/uploads/"):
+                    return self.serve_file(path[len("/uploads/"):], UPLOAD_DIR)
+                return self.serve_file("index.html" if path == "/" else path, APP_DIR)
+            if method != "GET" and not self.same_origin():
+                raise ApiError("Request blocked.", 403)
+            result = self.route(method, path, q)
+            if result is not None:
+                self.send_json(result)
+        except ApiError as e:
+            self.send_json({"error": str(e)}, e.status)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as e:
+            traceback.print_exc()
+            self.send_json({"error": "Server error: %s" % e}, 500)
+
+    def do_GET(self):
+        self.handle_any("GET")
+
+    def do_POST(self):
+        self.handle_any("POST")
+
+    def do_PUT(self):
+        self.handle_any("PUT")
+
+    def do_DELETE(self):
+        self.handle_any("DELETE")
+
+    def route(self, method, path, q):
+        parts = [p for p in path.split("/") if p]
+        if len(parts) < 2:
+            raise ApiError("Not found.", 404)
+        if parts[0] == "oauth":
+            if len(parts) < 3:
+                raise ApiError("Not found.", 404)
+            if parts[1] == "start":
+                url = oauth_start(parts[2], BASE_URL)
+                self.send_response(302)
+                self.send_header("Location", url)
+                self.end_headers()
+                return None
+            try:
+                oauth_callback(parts[2], q)
+                target = "/#/channels?connected=" + parts[2]
+            except ApiError as e:
+                target = "/#/channels?error=" + urllib.parse.quote(str(e))
+            self.send_response(302)
+            self.send_header("Location", target)
+            self.end_headers()
+            return None
+
+        res = parts[1] if len(parts) > 1 else ""
+        rid = parts[2] if len(parts) > 2 else ""
+        act = parts[3] if len(parts) > 3 else ""
+
+        if res == "state" and method == "GET":
+            return state()
+
+        if res == "brand" and method == "PUT":
+            data = self.json_body()
+            with LOCK:
+                for k in DEFAULT_DB["brand"]:
+                    if k in data and k != "site":
+                        DB["brand"][k] = data[k]
+                save_db()
+            return state()
+
+        if res == "settings" and method == "PUT":
+            data = self.json_body()
+            with LOCK:
+                for k in DEFAULT_DB["settings"]:
+                    if k in data:
+                        DB["settings"][k] = data[k]
+                if "aiKey" in data:
+                    SECRETS["ai_key"] = (data["aiKey"] or "").strip()
+                    save_secrets()
+                save_db()
+            return state()
+
+        if res == "scan" and method == "POST":
+            data = self.json_body()
+            site = scan_site(data.get("url") or DB["brand"].get("website", ""))
+            with LOCK:
+                DB["brand"]["site"] = site
+                DB["brand"]["website"] = site["url"]
+                save_db()
+            return state()
+
+        if res == "import-image" and method == "POST":
+            url = self.json_body().get("url", "")
+            site = DB["brand"].get("site") or {}
+            if url not in [i["url"] for i in site.get("images", [])]:
+                raise ApiError("Only images found on the scanned website can be imported.")
+            status, headers, raw = http("GET", url, timeout=30)
+            if status >= 400:
+                raise ApiError("Could not download the image (HTTP %s)." % status)
+            mime = headers.get("Content-Type", "").split(";")[0].strip().lower()
+            if not mime.startswith("image/"):
+                raise ApiError("That link is not an image.")
+            add_asset(raw, mime, "photo", os.path.basename(urllib.parse.urlparse(url).path) or "website image", source=url)
+            return state()
+
+        if res == "keydates" and method == "POST":
+            return suggest_key_dates(self.json_body())
+
+        if res == "generate" and method == "POST":
+            return generate(self.json_body())
+
+        if res == "assets":
+            if method == "POST":
+                blob = self.body()
+                if not blob:
+                    raise ApiError("Empty file.")
+                asset = add_asset(blob, self.headers.get("Content-Type", ""), q.get("kind", "photo"), q.get("name", ""))
+                out = state()
+                out["asset"] = asset
+                return out
+            if method == "DELETE" and rid:
+                with LOCK:
+                    asset = asset_by_id(rid)
+                    if asset:
+                        DB["assets"].remove(asset)
+                        try:
+                            os.remove(os.path.join(UPLOAD_DIR, asset["file"]))
+                        except OSError:
+                            pass
+                        for p in DB["posts"]:
+                            if rid in (p.get("mediaIds") or []) and p.get("status") in ("draft", "scheduled"):
+                                p["mediaIds"].remove(rid)
+                        if DB["brand"].get("logoId") == rid:
+                            DB["brand"]["logoId"] = ""
+                        save_db()
+                return state()
+
+        if res == "posts":
+            if method == "POST" and not rid:
+                data = self.json_body()
+                post = clean_post(data, {})
+                post.update({"id": uuid.uuid4().hex[:12], "createdAt": now_iso(), "results": {}})
+                with LOCK:
+                    DB["posts"].append(post)
+                    save_db()
+                out = state()
+                out["post"] = post
+                return out
+            with LOCK:
+                post = next((p for p in DB["posts"] if p["id"] == rid), None)
+            if not post:
+                raise ApiError("Post not found.", 404)
+            if method == "PUT":
+                with LOCK:
+                    post.update(clean_post(self.json_body(), post))
+                    save_db()
+                out = state()
+                out["post"] = post
+                return out
+            if method == "DELETE":
+                with LOCK:
+                    DB["posts"].remove(post)
+                    save_db()
+                return state()
+            if method == "POST" and act == "publish":
+                publish_post(rid, only_failed=True)
+                return state()
+
+        if res == "channels" and rid in CHANNEL_FIELDS:
+            if method == "PUT":
+                data = self.json_body()
+                with LOCK:
+                    c = chan(rid)
+                    for f in CHANNEL_FIELDS[rid]:
+                        if f in data and (data[f] or f not in SECRET_FIELDS):
+                            c[f] = str(data[f]).strip()
+                    if rid == "linkedin" and c.get("org_id") and not data.get("author_urn"):
+                        c["author_urn"] = "urn:li:organization:%s" % c["org_id"]
+                    if data.get("selectPage"):
+                        select_page(data["selectPage"])
+                    save_secrets()
+                return state()
+            if method == "POST" and act == "test":
+                test_channel(rid)
+                return state()
+            if method == "DELETE":
+                with LOCK:
+                    SECRETS["channels"][rid] = {}
+                    save_secrets()
+                return state()
+
+        raise ApiError("Not found.", 404)
+
+
+def clean_post(data, existing):
+    out = {}
+    for k in ("caption", "captions", "channels", "mediaIds", "scheduledAt", "title", "privacy", "topic", "holiday"):
+        if k in data:
+            out[k] = data[k]
+    status = data.get("status")
+    if status in ("draft", "scheduled"):
+        if status == "scheduled" and not (out.get("scheduledAt") or existing.get("scheduledAt")):
+            raise ApiError("Pick a date and time to schedule this post.")
+        out["status"] = status
+        if existing.get("status") in ("failed", "missed", "partial") and status == "scheduled":
+            out["results"] = {}
+    elif not existing:
+        out["status"] = "draft"
+    out["channels"] = [c for c in out.get("channels", existing.get("channels", [])) if c in PUBLISHERS]
+    out["updatedAt"] = now_iso()
+    return out
+
+
+def main():
+    threading.Thread(target=scheduler, daemon=True).start()
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    except OSError as e:
+        print("Could not start on port %d (%s). Is the app already running?" % (PORT, e))
+        sys.exit(1)
+    server.daemon_threads = True
+    print("UPSMRT Social Studio is running:  %s" % BASE_URL)
+    print("Keep this window open - scheduled posts are published while it runs. Ctrl+C to stop.")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopped.")
+
+
+if __name__ == "__main__":
+    main()

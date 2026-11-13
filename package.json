@@ -1,0 +1,13 @@
+{
+  "name": "upsmrt-social-studio",
+  "private": true,
+  "type": "module",
+  "description": "UPSMRT Social Studio: hosted version (Netlify functions + Blobs). The local version is server.py.",
+  "dependencies": {
+    "@netlify/blobs": "^11.1.9",
+    "@netlify/functions": "^6.1.1"
+  },
+  "devDependencies": {
+    "netlify-cli": "^27.17.0"
+  }
+}

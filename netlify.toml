@@ -1,0 +1,12 @@
+# UPSMRT Social Studio on Netlify.
+# The interface is the static "app" folder; the server is the functions in netlify/functions.
+[build]
+  publish = "app"
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+
+[dev]
+  port = 8899
+  autoLaunch = false
