@@ -3,16 +3,30 @@ export const S = { data: null };
 const listeners = [];
 export function onState(fn) { listeners.push(fn); }
 
+// Which client brand this browser is working on. The server keeps each brand's data apart.
+const BRAND_KEY = 'studio.brand';
+export const brandId = () => { try { return localStorage.getItem(BRAND_KEY) || ''; } catch (e) { return ''; } };
+export function setBrand(id) { try { localStorage.setItem(BRAND_KEY, id || ''); } catch (e) { /* private window */ } }
+export const brandHeaders = () => (brandId() ? { 'X-Brand': brandId() } : {});
+export const isDefaultBrand = () => (S.data.brandId || 'upsmrt') === 'upsmrt';
+// Dark enough to be used for text on a light background.
+export function isDark(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || ''), n = m ? parseInt(m[1], 16) : 0xffffff;
+  return (0.299 * (n >> 16) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255 < 0.5;
+}
+export function refresh() { listeners.forEach((f) => f()); }
+
 export function setState(d, quiet) {
   if (d && d.brand) {
     S.data = d;
+    if (d.brandId && d.brandId !== brandId()) setBrand(d.brandId);
     if (!quiet) listeners.forEach((f) => f());
   }
   return d;
 }
 
 export async function api(method, path, body, opts = {}) {
-  const opt = { method, headers: {} };
+  const opt = { method, headers: brandHeaders() };
   if (opts.raw) { opt.body = body; opt.headers['Content-Type'] = opts.raw; }
   else if (body !== undefined) { opt.body = JSON.stringify(body); opt.headers['Content-Type'] = 'application/json'; }
   let r;
@@ -30,7 +44,7 @@ export async function api(method, path, body, opts = {}) {
 async function waitJob(id) {
   for (let i = 0; i < 200; i++) {
     await new Promise((res) => setTimeout(res, 2000));
-    const r = await fetch('/api/jobs/' + id);
+    const r = await fetch('/api/jobs/' + id, { headers: brandHeaders() });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || 'Request failed');
     if (j.status === 'done') return j.result;
@@ -133,8 +147,14 @@ export const isImage = (a) => a && a.mime.startsWith('image');
 export const mediaAssets = () => S.data.assets.filter((a) => isImage(a) && a.kind !== 'logo' || isVideo(a));
 export const photos = () => S.data.assets.filter((a) => a.kind === 'photo' && isImage(a));
 
-export async function uploadFile(file, kind, name) {
-  if (!file.type) throw new Error('Unknown file type: ' + file.name);
+const DOC_TYPES = { csv: 'text/csv', txt: 'text/plain', md: 'text/markdown', pdf: 'application/pdf',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
+
+export async function uploadFile(input, kind, name) {
+  // Some systems report no type, or a spreadsheet type, for .csv and .md files: go by the file extension for documents.
+  const type = DOC_TYPES[(input.name || '').split('.').pop().toLowerCase()] || input.type;
+  if (!type) throw new Error('Unknown file type: ' + input.name);
+  const file = type === input.type ? input : new File([input], input.name, { type });
   const label = encodeURIComponent(name || file.name || kind), PIECE = 3 * 1024 * 1024;
   if (S.data.hosted && file.size > PIECE) {
     // The hosted version accepts only small requests, so large files go up in pieces.

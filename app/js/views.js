@@ -1,10 +1,11 @@
 // Dashboard, Calendar, Posts, Library, Brand kit, Channels, Settings.
 import { S, $, $$, api, esc, toast, guard, modal, confirmBox, asset, isVideo, isImage, uploadFile, thumb, photos,
-  CH, CH_KEYS, chBadge, STATUS, ymd, pad, toUtc, fromUtc, niceDate, postDay, go } from './core.js';
+  CH, CH_KEYS, chBadge, STATUS, ymd, pad, toUtc, fromUtc, niceDate, postDay, go, isDefaultBrand, isDark } from './core.js';
 import { holidays, holidayMap, upcomingHolidays } from './holidays.js';
 import { openComposer } from './composer.js';
-import { CATS, kdSettings, keyDateMap, openKeyDates, postFromKeyDate } from './keydates.js';
-import { renderDesignToAsset, fontList, studioPreset } from './studio.js';
+import { cat, catMap, kdSettings, saveKd, keyDateMap, openKeyDates, postFromKeyDate, openInternal } from './keydates.js';
+import { renderDesignToAsset, fontList, studioPreset, MOTIFS } from './studio.js';
+import { suggestions, suggestionRow, bindSuggestions, openSuggestion, approveMany } from './suggest.js';
 
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const regions = () => S.data.settings.holidayRegions;
@@ -12,19 +13,20 @@ const firstLine = (p) => (p.caption || Object.values(p.captions || {})[0] || p.t
 
 function postRow(p) {
   const a = asset((p.mediaIds || [])[0]);
-  return `<button class="post-row" data-post="${p.id}"><span class="pr-thumb">${a ? thumb(a) : ''}</span>
+  return `<button class="post-row" ${p.suggested ? 'data-sg' : 'data-post'}="${p.id}"><span class="pr-thumb">${a ? thumb(a) : ''}</span>
     <span class="pr-main"><b>${esc(firstLine(p).slice(0, 90))}</b><small>${p.scheduledAt ? esc(niceDate(fromUtc(p.scheduledAt), true)) : 'No date'}</small></span>
-    <span class="pr-ch">${p.channels.map((k) => chBadge(k, true)).join('')}</span><span class="status ${p.status}">${STATUS[p.status] || p.status}</span></button>`;
+    <span class="pr-ch">${p.channels.map((k) => chBadge(k, true)).join('')}</span><span class="status ${p.suggested ? 'suggested' : p.status}">${p.suggested ? 'Suggested' : STATUS[p.status] || p.status}</span></button>`;
 }
 function bindPosts(root) {
   $$('[data-post]', root).forEach((b) => (b.onclick = () => openComposer({ post: S.data.posts.find((p) => p.id === b.dataset.post) })));
+  $$('[data-sg]', root).forEach((b) => (b.onclick = () => openSuggestion(S.data.posts.find((p) => p.id === b.dataset.sg))));
 }
 
 // ---------------------------------------------------------------- Dashboard
 export function renderDashboard(root) {
   const d = S.data, now = new Date(), posts = d.posts;
   const upcoming = posts.filter((p) => p.status === 'scheduled').sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt));
-  const drafts = posts.filter((p) => p.status === 'draft');
+  const drafts = posts.filter((p) => p.status === 'draft' && !p.suggested), sugg = suggestions();
   const month = ymd(now).slice(0, 7);
   const published = posts.filter((p) => ['published', 'partial'].includes(p.status) && (p.publishedAt || '').startsWith(month));
   const trouble = posts.filter((p) => ['failed', 'missed', 'partial'].includes(p.status));
@@ -34,14 +36,17 @@ export function renderDashboard(root) {
     { done: !!(d.brand.voice || d.brand.guidelinesText || d.assets.some((a) => a.kind === 'guideline')), label: 'Add brand guidelines and voice', to: 'brand' },
     { done: photos().length > 0, label: 'Upload brand photos', to: 'library' },
     { done: connected.length > 0, label: 'Connect your social channels', to: 'channels' },
+    { done: (d.settings.sources || []).length > 0, label: 'Add your industry lists: trade shows, publications, competitors (optional)', to: 'sources' },
     { done: d.ai.enabled, label: 'Add an AI key for original copy (optional)', to: 'settings' },
   ];
   const todo = steps.filter((s) => !s.done);
   root.innerHTML = `<header class="page-head"><div><h1>Good ${now.getHours() < 12 ? 'morning' : now.getHours() < 18 ? 'afternoon' : 'evening'}</h1>
-      <p>${esc(niceDate(now))} · ${connected.length} of 4 channels connected</p></div>
+      <p>${esc(d.brand.name || 'Your brand')} · ${esc(niceDate(now))} · ${connected.length} of 4 channels connected</p></div>
       <button class="btn primary" id="new">+ New post</button></header>
     ${todo.length ? `<section class="panel setup"><h3>Finish setting up <span class="muted">${steps.length - todo.length} of ${steps.length} done</span></h3>
       <div class="steps">${steps.map((s) => `<button class="step ${s.done ? 'done' : ''}" data-go="${s.to}"><i>${s.done ? '✓' : ''}</i>${s.label}</button>`).join('')}</div></section>` : ''}
+    ${sugg.length ? `<section class="panel sg-banner"><div class="grow"><b>✦ ${sugg.length} suggested post${sugg.length > 1 ? 's' : ''} for your coming key dates</b>
+      <small class="muted">Written and laid out for each date. Nothing is scheduled until you approve it.</small></div><button class="btn accent" data-go="posts?f=suggested">Review suggestions</button></section>` : ''}
     <section class="stats"><div class="stat"><b>${upcoming.length}</b><span>Scheduled</span></div><div class="stat"><b>${drafts.length}</b><span>Drafts to review</span></div>
       <div class="stat"><b>${published.length}</b><span>Published this month</span></div><div class="stat ${trouble.length ? 'warn' : ''}"><b>${trouble.length}</b><span>Need attention</span></div></section>
     <div class="cols"><section class="panel"><h3>Up next</h3>${upcoming.length ? upcoming.slice(0, 6).map(postRow).join('')
@@ -71,7 +76,7 @@ export function renderCalendar(root) {
   const start = new Date(y, m, 1);
   start.setDate(1 - start.getDay());
   const end = new Date(start); end.setDate(start.getDate() + 41);
-  const kmap = keyDateMap(ymd(start), ymd(end)), kcats = kdSettings().cats, kd = {};
+  const kmap = keyDateMap(ymd(start), ymd(end)), kcats = kdSettings().cats, kd = {}, cmap = catMap(), nsg = suggestions().length;
   const byDay = {};
   S.data.posts.forEach((p) => { const k = postDay(p); if (k) (byDay[k] = byDay[k] || []).push(p); });
   let cells = '';
@@ -84,15 +89,17 @@ export function renderCalendar(root) {
       <div class="day-num"><span>${dt.getDate()}</span><button class="add" data-add="${k}" title="New post">+</button></div>
       ${hs.map((h) => { kd[h.key] = h; return h.cat === 'canada'
         ? `<button class="hol ${h.solemn ? 'solemn' : ''}" data-kd="${esc(h.key)}" title="${esc(h.where || h.name)}">🍁 ${esc(h.name)}</button>`
-        : `<button class="hol kd ${h.approx ? 'approx' : ''}" style="--c:${CATS[h.cat].color}" data-kd="${esc(h.key)}" title="${esc(CATS[h.cat].label + (h.approx ? ' — estimated date, confirm before posting' : '') + ': ' + h.msg)}">${h.approx ? '≈ ' : ''}${esc(h.name)}</button>`; }).join('')}
-      ${ps.map((p) => `<button class="pill ${p.status}" draggable="${['draft', 'scheduled', 'missed', 'failed'].includes(p.status)}" data-post="${p.id}">
+        : `<button class="hol kd ${h.approx ? 'approx' : ''} ${h.internal ? 'int' : ''}" style="--c:${cat(h.cat).color}" data-kd="${esc(h.key)}" title="${esc(cat(h.cat).label + (h.internal ? ' — internal, not a post' : '') + (h.approx ? ' — estimated date, confirm before posting' : '') + ': ' + h.msg)}">${h.internal ? '🔒 ' : ''}${h.approx ? '≈ ' : ''}${esc(h.name)}</button>`; }).join('')}
+      ${ps.map((p) => p.suggested ? `<button class="pill suggested" data-sg="${p.id}" style="--c:${cat(p.kdCat).color}" title="Suggested post — click to review, approve or dismiss">
+        <span class="t">✦</span><span class="cap">${esc(firstLine(p).slice(0, 40))}</span></button>` : `<button class="pill ${p.status}" draggable="${['draft', 'scheduled', 'missed', 'failed'].includes(p.status)}" data-post="${p.id}">
         <span class="t">${fromUtc(p.scheduledAt).toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit' }).replace(/\.| /g, '').toLowerCase()}</span>
         <span class="cap">${esc(firstLine(p).slice(0, 40))}</span><span class="dots">${p.channels.map((c) => `<i style="background:${CH[c].color}"></i>`).join('')}</span></button>`).join('')}</div>`;
   }
   root.innerHTML = `<header class="page-head"><div class="cal-nav"><h1>${MONTHS[m]} ${y}</h1>
       <button class="btn sm" id="prev" aria-label="Previous month">‹</button><button class="btn sm" id="today">Today</button><button class="btn sm" id="next" aria-label="Next month">›</button></div>
-      <div class="row"><button class="btn" id="kdates">★ Key dates</button><button class="btn accent" id="plan">✦ Plan this month</button><button class="btn primary" id="new">+ New post</button></div></header>
-    <div class="legend">${Object.keys(CATS).filter((c) => kcats[c]).map((c) => `<span><i class="lg" style="background:${CATS[c].color}"></i>${CATS[c].label}</span>`).join('')}<span class="sep"></span><span><i class="lg draft"></i>Draft</span><span><i class="lg scheduled"></i>Scheduled</span>
+      <div class="row wrap">${nsg ? `<button class="btn" id="sgopen">✦ ${nsg} suggestion${nsg > 1 ? 's' : ''}</button>` : ''}<button class="btn" id="kdates">★ Key dates</button><button class="btn accent" id="plan">✦ Plan this month</button><button class="btn primary" id="new">+ New post</button></div></header>
+    <div class="legend kd-legend">${Object.keys(cmap).map((c) => `<button class="lg-chip ${kcats[c] ? 'on' : ''}" data-lcat="${esc(c)}" aria-pressed="${!!kcats[c]}" style="--c:${cmap[c].color}" title="${kcats[c] ? 'Hide' : 'Show'} ${esc(cmap[c].label)}"><i></i>${esc(cmap[c].label)}</button>`).join('')}</div>
+    <div class="legend"><span><i class="lg sugg"></i>Suggested</span><span><i class="lg draft"></i>Draft</span><span><i class="lg scheduled"></i>Scheduled</span>
       <span><i class="lg published"></i>Published</span><span><i class="lg failed"></i>Needs attention</span><span class="muted">Drag a post to another day to reschedule.</span></div>
     <div class="cal"><div class="dow">${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => `<span>${d}</span>`).join('')}</div><div class="grid">${cells}</div></div>`;
   const move = (n) => { const d = new Date(cal.y, cal.m + n, 1); cal.y = d.getFullYear(); cal.m = d.getMonth(); renderCalendar(root); };
@@ -103,8 +110,14 @@ export function renderCalendar(root) {
   $('#plan', root).onclick = () => planMonth();
   $$('[data-add]', root).forEach((b) => (b.onclick = () => openComposer({ date: b.dataset.add })));
   $('#kdates', root).onclick = () => openKeyDates(new Date(y, m, 1));
+  if (nsg) $('#sgopen', root).onclick = () => go('posts?f=suggested');
+  // Each type of date can be shown or hidden straight from the legend.
+  $$('[data-lcat]', root).forEach((b) => (b.onclick = () => guard(() => { const k = kdSettings(); return saveKd({ cats: { ...k.cats, [b.dataset.lcat]: !k.cats[b.dataset.lcat] } }); })));
   $$('[data-kd]', root).forEach((b) => (b.onclick = () => {
     const it = kd[b.dataset.kd];
+    if (it.internal) return openInternal(it);
+    const made = S.data.posts.find((p) => p.suggested && postDay(p) === it.date && String(p.keyDate || '').startsWith(it.key + ':'));
+    if (made) return openSuggestion(made);
     if (it.cat === 'canada') return openComposer({ date: it.date, holiday: it });
     guard(() => postFromKeyDate(it), b);
   }));
@@ -184,17 +197,26 @@ function planMonth() {
 
 // -------------------------------------------------------------------- Posts
 let filter = 'all';
-export function renderPosts(root) {
-  const groups = { all: () => true, scheduled: (p) => p.status === 'scheduled', draft: (p) => p.status === 'draft',
+export function renderPosts(root, params = {}) {
+  const groups = { all: () => true, suggested: (p) => !!p.suggested && p.status === 'draft', scheduled: (p) => p.status === 'scheduled', draft: (p) => p.status === 'draft' && !p.suggested,
     published: (p) => ['published', 'partial'].includes(p.status), attention: (p) => ['failed', 'missed', 'partial'].includes(p.status) };
-  const labels = { all: 'All', scheduled: 'Scheduled', draft: 'Drafts', published: 'Published', attention: 'Need attention' };
+  const labels = { all: 'All', suggested: '✦ Suggested', scheduled: 'Scheduled', draft: 'Drafts', published: 'Published', attention: 'Need attention' };
+  if (groups[params.f]) { filter = params.f; history.replaceState(null, '', '#/posts'); }
   const list = S.data.posts.filter(groups[filter]).sort((a, b) => (b.scheduledAt || '').localeCompare(a.scheduledAt || ''));
-  const ready = S.data.posts.filter((p) => p.status === 'draft' && p.scheduledAt && fromUtc(p.scheduledAt) > new Date() && (p.caption || (p.mediaIds || []).length));
+  const ready = S.data.posts.filter((p) => p.status === 'draft' && !p.suggested && p.scheduledAt && fromUtc(p.scheduledAt) > new Date() && (p.caption || (p.mediaIds || []).length));
   root.innerHTML = `<header class="page-head"><div><h1>Posts</h1><p>Everything you have drafted, scheduled and published.</p></div>
       <div class="row">${ready.length ? `<button class="btn" id="bulk">Schedule ${ready.length} draft${ready.length > 1 ? 's' : ''}</button>` : ''}<button class="btn primary" id="new">+ New post</button></div></header>
     <div class="tabs left">${Object.keys(groups).map((k) => `<button class="${k === filter ? 'on' : ''}" data-f="${k}">${labels[k]} <span>${S.data.posts.filter(groups[k]).length}</span></button>`).join('')}</div>
-    <section class="panel">${list.length ? list.map(postRow).join('') : '<p class="muted">No posts here yet.</p>'}</section>`;
+    ${filter === 'suggested' ? suggestedPanel() : `<section class="panel">${list.length ? list.map(postRow).join('') : '<p class="muted">No posts here yet.</p>'}</section>`}`;
   $('#new', root).onclick = () => openComposer();
+  bindSuggestions(root);
+  $$('[data-okmonth]', root).forEach((b) => (b.onclick = async () => {
+    const todo = suggestions().filter((p) => ymd(fromUtc(p.scheduledAt)).slice(0, 7) === b.dataset.okmonth);
+    if (!(await confirmBox(`Approve ${todo.length} suggestion${todo.length > 1 ? 's' : ''}?`, 'Each one is scheduled to publish at its planned time. Suggestions whose date is not confirmed are left for you to check.', 'Approve and schedule'))) return;
+    guard(() => approveMany(todo), b);
+  }));
+  const kdl = $('#sgkd', root);
+  if (kdl) kdl.onclick = () => openKeyDates(new Date());
   $$('[data-f]', root).forEach((b) => (b.onclick = () => { filter = b.dataset.f; renderPosts(root); }));
   const bulk = $('#bulk', root);
   if (bulk) bulk.onclick = async () => {
@@ -207,12 +229,24 @@ export function renderPosts(root) {
   bindPosts(root);
 }
 
+// Suggested posts, grouped by month, each with approve / edit / regenerate / dismiss.
+function suggestedPanel() {
+  const list = suggestions(), auto = kdSettings().auto;
+  if (!list.length) return `<section class="panel"><p class="muted">${auto ? 'No suggestions waiting. New ones appear here when a key date comes within the next two months, or when you switch on a type of date.' : 'Automatic suggestions are switched off.'}</p>
+    <button class="btn sm" id="sgkd">★ Open key dates</button></section>`;
+  const months = {};
+  list.forEach((p) => { const k = ymd(fromUtc(p.scheduledAt)).slice(0, 7); (months[k] = months[k] || []).push(p); });
+  return `<p class="muted">One suggested post for each of your coming key dates, written for its type. Nothing here is scheduled until you approve it. Dismissed suggestions do not come back.</p>` + Object.entries(months).map(([k, ps]) =>
+    `<section class="panel"><div class="sg-head"><h3>${MONTHS[+k.slice(5) - 1]} ${k.slice(0, 4)} <span class="muted">${ps.length}</span></h3><button class="btn sm" data-okmonth="${k}">Approve all for ${MONTHS[+k.slice(5) - 1]}</button></div>
+      ${ps.map(suggestionRow).join('')}</section>`).join('');
+}
+
 // ------------------------------------------------------------------ Library
 let lib = 'all';
 export function renderLibrary(root) {
-  const kinds = { all: 'All', photo: 'Photos', design: 'Designs', reel: 'Reels', logo: 'Logos', guideline: 'Documents' };
+  const kinds = { all: 'All', photo: 'Photos', design: 'Designs', reel: 'Reels', logo: 'Logos', guideline: 'Documents', source: 'Source files' };
   const list = S.data.assets.filter((a) => lib === 'all' || a.kind === lib);
-  root.innerHTML = `<header class="page-head"><div><h1>Library</h1><p>Your photos, logos, generated visuals and reels.</p></div>
+  root.innerHTML = `<header class="page-head"><div><h1>Library</h1><p>Photos, logos, generated visuals and reels for ${esc(S.data.brand.name || 'this brand')}.</p></div>
       <label class="btn primary">Upload files<input type="file" id="up" multiple hidden accept="image/png,image/jpeg,image/webp,video/mp4,video/quicktime,video/webm"></label></header>
     <div class="tabs left">${Object.entries(kinds).map(([k, n]) => `<button class="${k === lib ? 'on' : ''}" data-k="${k}">${n}</button>`).join('')}</div>
     <div class="drop-zone" id="dz">${list.length ? `<div class="grid-assets">${list.map((a) => `<div class="tile">${thumb(a)}<span>${esc(a.name)}</span>
@@ -240,7 +274,9 @@ export function renderBrand(root) {
   const b = S.data.brand, site = b.site;
   const logos = S.data.assets.filter((a) => a.kind === 'logo'), docs = S.data.assets.filter((a) => a.kind === 'guideline');
   const colorKeys = { primary: 'Primary', accent: 'Accent', light: 'Background', text: 'Text' };
-  root.innerHTML = `<header class="page-head"><div><h1>Brand kit</h1><p>Everything the studio and the assistant use to stay on brand. Changes save automatically.</p></div></header>
+  const own = !isDefaultBrand(), nsrc = (S.data.settings.sources || []).length, siteLogos = (site && site.logos) || [];
+  root.innerHTML = `<header class="page-head"><div><h1>Brand kit: ${esc(b.name || 'Untitled brand')}</h1><p>Everything the studio and the assistant use for this brand: logo, colours, photos, voice and sources. Changes save automatically.</p></div>
+      ${own ? '<button class="btn ghost danger-text" id="delbrand">Delete this brand</button>' : ''}</header>
     <div class="cols"><div>
     <section class="panel"><h3>Website — content source</h3>
       <p class="muted">The assistant writes from what is on your site: pages, headings and text. Images found can be added to your library.</p>
@@ -248,29 +284,41 @@ export function renderBrand(root) {
       ${site ? `<div class="site-card"><b>${esc(site.title || site.url)}</b><small>${esc(site.description || '')}</small>
         <small class="muted">${site.pages.length} page${site.pages.length > 1 ? 's' : ''} read · ${site.images.length} images found · scanned ${esc(niceDate(fromUtc(site.scannedAt), true))}</small>
         <details><summary>Pages read</summary><ul>${site.pages.map((p) => `<li>${esc(p.title || p.url)} <span class="muted">${p.headings.length} headings, ${p.paragraphs.length} paragraphs</span></li>`).join('')}</ul></details>
-        ${site.colors.length ? `<div class="row wrap"><small class="muted">Colours on your site:</small>${site.colors.map((c) => `<button class="sw" style="background:${esc(c)}" data-sitecolor="${esc(c)}" title="${esc(c)} — click to use as primary"></button>`).join('')}</div>` : ''}
+        ${site.colors.length ? `<div class="row wrap"><small class="muted">Use as primary colour:</small>${site.colors.map((c) => `<button class="sw" style="background:${esc(c)}" data-sitecolor="${esc(c)}" data-as="primary" title="${esc(c)} — use as primary"></button>`).join('')}</div>
+          <div class="row wrap"><small class="muted">Use as accent colour:</small>${site.colors.map((c) => `<button class="sw" style="background:${esc(c)}" data-sitecolor="${esc(c)}" data-as="accent" title="${esc(c)} — use as accent"></button>`).join('')}</div>` : ''}
+        ${siteLogos.length ? `<details open><summary>Logos found (${siteLogos.length}) — click one to use it as the brand logo</summary><div class="site-imgs logos">${siteLogos.map((im) =>
+          `<button data-importlogo="${esc(im.url)}" title="Use as logo"><img src="${esc(im.url)}" alt="${esc(im.alt)}" loading="lazy" referrerpolicy="no-referrer"></button>`).join('')}</div></details>` : ''}
         ${site.images.length ? `<details><summary>Images found (${site.images.length}) — click to add to your library</summary><div class="site-imgs">${site.images.map((im) =>
           `<button data-import="${esc(im.url)}" title="Add to library"><img src="${esc(im.url)}" alt="${esc(im.alt)}" loading="lazy" referrerpolicy="no-referrer"></button>`).join('')}</div></details>` : ''}</div>` : ''}
     </section>
     <section class="panel"><h3>Identity</h3>
       <div class="row"><div class="grow"><label>Brand name</label><input data-f="name" value="${esc(b.name)}"></div>
       <div class="grow"><label>Tagline</label><input data-f="tagline" value="${esc(b.tagline)}"></div></div>
-      <label>Logo</label><div class="logo-row"><button class="logo-opt ${!b.logoId ? 'on' : ''}" data-logo=""><img src="/img/logo.svg" alt="UPSMRT"></button>
+      <label>Logo</label><div class="logo-row"><button class="logo-opt ${!b.logoId ? 'on' : ''}" data-logo="">${own ? `<b class="wordmark">${esc(b.name || 'Brand name')}</b>` : '<img src="/img/logo.svg" alt="UPSMRT">'}</button>
         ${logos.map((a) => `<button class="logo-opt ${b.logoId === a.id ? 'on' : ''}" data-logo="${a.id}"><img src="${a.url}" alt="${esc(a.name)}"></button>`).join('')}
         <label class="logo-opt add">+ Upload<input type="file" id="uplogo" hidden accept="image/png,image/svg+xml,image/jpeg,image/webp"></label></div>
       <label>Colours</label><div class="colors">${Object.entries(colorKeys).map(([k, n]) => `<label class="color"><input type="color" data-c="${k}" value="${esc(b.colors[k])}"><span>${n}<small>${esc(b.colors[k])}</small></span></label>`).join('')}</div>
       <label>Typeface for visuals</label><select data-f="font">${fontList().map((f) => `<option ${f === b.font ? 'selected' : ''}>${f}</option>`).join('')}</select>
+      <label>Graphic shape in the visual templates</label><div class="seg" id="motif">${Object.entries(MOTIFS).map(([k, n]) => `<button class="${(b.motif || 'bubble') === k ? 'on' : ''}" data-motif="${k}">${n}</button>`).join('')}</div>
+    </section>
+    <section class="panel"><h3>Industry data sources <span class="muted">${nsrc}</span></h3>
+      <p class="muted">Upload or link this brand's lists of industry publications, trade shows, competitors and associations. The assistant reads them and proposes key dates for the calendar.</p>
+      <button class="btn" data-gosrc>${nsrc ? 'Manage data sources' : 'Add data sources'}</button>
     </section></div><div>
     <section class="panel"><h3>Voice</h3>
       <label>Language</label><select data-f="language"><option value="en" ${b.language === 'en' ? 'selected' : ''}>English</option><option value="fr" ${b.language === 'fr' ? 'selected' : ''}>Français</option><option value="bilingual" ${b.language === 'bilingual' ? 'selected' : ''}>Bilingual (FR + EN)</option></select>
       <label>Tone of voice</label><textarea data-f="voice" rows="3" placeholder="e.g. Confident and plain-spoken. Short sentences. No jargon, no exclamation marks.">${esc(b.voice)}</textarea>
       <label>Audience</label><textarea data-f="audience" rows="2" placeholder="e.g. Owners and executives of mid-sized Canadian companies">${esc(b.audience)}</textarea>
       <label>Hashtags to use</label><input data-f="hashtags" placeholder="#consulting #strategy" value="${esc(b.hashtags)}">
+      <button class="btn sm accent mt-s" id="kitai">✦ Suggest voice and audience from the website</button>
+      <small class="muted">Fills in only the fields that are empty. ${S.data.ai.enabled ? '' : 'Needs an AI key (Settings).'}</small>
     </section>
     <section class="panel"><h3>Brand guidelines</h3>
       <p class="muted">Upload your guidelines (PDF is read by the assistant when an AI key is set) and paste the key rules below.</p>
       ${docs.map((a) => `<div class="doc-row"><span class="doc-ic">${esc(a.file.split('.').pop().toUpperCase())}</span><a href="${a.url}" target="_blank">${esc(a.name)}</a><button class="x" data-deldoc="${a.id}" title="Remove">×</button></div>`).join('')}
       <label class="btn sm">Upload guidelines<input type="file" id="updoc" hidden accept="application/pdf,text/plain,text/markdown,.md,.docx"></label>
+      <label>Or link to the guidelines <span class="muted">(Google Drive, Dropbox, OneDrive or a web page, shared with anyone who has the link)</span></label>
+      <div class="row"><input id="doclink" placeholder="https://drive.google.com/…" autocomplete="off"><button class="btn" id="docadd">Add</button></div>
       <label>Key rules</label><textarea data-f="guidelinesText" rows="6" placeholder="Do: … Don't: … Always mention … Never say …">${esc(b.guidelinesText)}</textarea>
     </section>
     <section class="panel"><h3>Photos <span class="muted">${photos().length}</span></h3>
@@ -280,7 +328,32 @@ export function renderBrand(root) {
   const save = (patch) => api('PUT', 'brand', patch, { quiet: true }).catch((e) => toast(e.message, 'err'));
   $$('[data-f]', root).forEach((i) => (i.onchange = () => save({ [i.dataset.f]: i.value })));
   $$('[data-c]', root).forEach((i) => (i.onchange = () => { const colors = { ...S.data.brand.colors, [i.dataset.c]: i.value.toUpperCase() }; save({ colors }).then(() => renderBrand(root)); }));
-  $$('[data-sitecolor]', root).forEach((s) => (s.onclick = () => guard(() => api('PUT', 'brand', { colors: { ...S.data.brand.colors, primary: s.dataset.sitecolor } }))));
+  $$('[data-sitecolor]', root).forEach((s) => (s.onclick = () => guard(() => api('PUT', 'brand', { colors: { ...S.data.brand.colors, [s.dataset.as]: s.dataset.sitecolor, ...(s.dataset.as === 'primary' && isDark(s.dataset.sitecolor) ? { text: s.dataset.sitecolor } : {}) } }))));
+  $$('[data-importlogo]', root).forEach((bt) => (bt.onclick = () => guard(async () => { await api('POST', 'import-image', { url: bt.dataset.importlogo, kind: 'logo' }); toast('Logo set for this brand.'); }, bt)));
+  $$('[data-motif]', root).forEach((bt) => (bt.onclick = () => guard(() => api('PUT', 'brand', { motif: bt.dataset.motif }))));
+  $('[data-gosrc]', root).onclick = () => go('sources');
+  $('#docadd', root).onclick = (e) => guard(async () => {
+    const url = $('#doclink', root).value.trim();
+    if (!url) throw new Error('Paste the link to the guidelines first.');
+    const before = S.data.assets.length;
+    await api('POST', 'import-doc', { url });
+    toast(S.data.assets.length > before ? 'Guidelines PDF added.' : 'The text of that document was added to the key rules.');
+  }, e.currentTarget);
+  $('#kitai', root).onclick = (e) => guard(async () => {
+    if (!S.data.ai.enabled) throw new Error('This needs an Anthropic API key. Add one in Settings.');
+    const g = (await api('POST', 'brandkit', {}, { quiet: true })).suggestion || {}, cur = S.data.brand, patch = {};
+    ['tagline', 'voice', 'audience', 'hashtags'].forEach((f) => { if (!String(cur[f] || '').trim() && g[f]) patch[f] = g[f]; });
+    if (g.industry && !(S.data.settings.keyDates || {}).industry) await saveKd({ industry: g.industry }, true);
+    if (!Object.keys(patch).length) return toast('Nothing to fill in: these fields already have text. Clear one to have it suggested.');
+    await api('PUT', 'brand', patch);
+    toast(`Filled in: ${Object.keys(patch).join(', ')}. Read them over and adjust.`, 'ok', 7000);
+  }, e.currentTarget);
+  const del = $('#delbrand', root);
+  if (del) del.onclick = async () => {
+    const n = S.data.posts.length, name = S.data.brand.name || 'this brand';
+    if (!(await confirmBox(`Delete ${name}?`, `This permanently deletes the brand kit, library, ${n} post${n === 1 ? '' : 's'}, key dates, data sources and channel connections of ${name}. It cannot be undone. Posts already published stay on the social networks.`, 'Delete brand', true))) return;
+    guard(async () => { await api('DELETE', 'brands/' + S.data.brandId, undefined, { quiet: true }); location.hash = '#/dashboard'; location.reload(); }, del);
+  };
   $$('[data-logo]', root).forEach((l) => (l.onclick = () => guard(() => api('PUT', 'brand', { logoId: l.dataset.logo }))));
   $('#scan', root).onclick = (e) => guard(async () => {
     const url = $('#site', root).value.trim();
@@ -323,7 +396,7 @@ export function renderChannels(root, params = {}) {
       `<label>${label}</label><input ${secret ? 'type="password"' : ''} data-cf="${k}.${key}" ${secret ? `placeholder="${ch[k].fields[key] ? '•••••••• saved' : ''}"` : `value="${esc(ch[k].fields[key] || '')}"`} autocomplete="off">`).join('')}
       <button class="btn sm" data-save="${k}">Save</button></details>`;
   const pages = ch.facebook.pages || [];
-  root.innerHTML = `<header class="page-head"><div><h1>Channels</h1><p>Connect the accounts you publish to. Keys and tokens stay on this computer.</p></div></header>
+  root.innerHTML = `<header class="page-head"><div><h1>Channels: ${esc(S.data.brand.name || 'this brand')}</h1><p>Connect the accounts this brand publishes to. Each brand has its own connections. ${S.data.hosted ? 'Keys and tokens are kept in this app\'s private storage.' : 'Keys and tokens stay on this computer.'}</p></div></header>
     ${params.error ? `<div class="banner bad">${esc(params.error)}</div>` : ''}${params.connected ? `<div class="banner good">${esc(CH[params.connected] ? CH[params.connected].name : '')} connected.</div>` : ''}
     <div class="cols">
     ${card('facebook', `${oauth('facebook')}${pages.length > 1 ? `<label>Page to publish to</label><select id="page">${pages.map((p) => `<option value="${p.id}" ${p.id === ch.facebook.fields.page_id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>` : ''}
@@ -338,7 +411,7 @@ export function renderChannels(root, params = {}) {
     const k = b.dataset.connect, g = GUIDE[k], vals = collect(k);
     if (!vals[g.idKey] || !(vals[g.secretKey] || ch[k].fields[g.secretKey])) throw new Error(`Enter the ${g.id} and ${g.secret} first.`);
     await api('PUT', 'channels/' + k, vals, { quiet: true });
-    location.href = '/oauth/start/' + k;
+    location.href = '/oauth/start/' + k + '?brand=' + encodeURIComponent(S.data.brandId || '');
   }, b)));
   $$('[data-save]', root).forEach((b) => (b.onclick = () => guard(async () => { await api('PUT', 'channels/' + b.dataset.save, collect(b.dataset.save)); toast('Saved.'); }, b)));
   $$('[data-test]', root).forEach((b) => (b.onclick = () => guard(async () => { await api('POST', `channels/${b.dataset.test}/test`); toast(CH[b.dataset.test].name + ' connection works.'); }, b)));
@@ -358,8 +431,8 @@ export function renderSettings(root) {
       <div class="status-line ${S.data.ai.enabled ? 'good' : ''}">${S.data.ai.enabled ? '● AI writing is on' : '○ AI writing is off'}</div>
       <label>Anthropic API key</label><div class="row"><input type="password" id="key" placeholder="${S.data.ai.enabled ? '•••••••• saved' : 'sk-ant-…'}" autocomplete="off">
       <button class="btn primary" id="savekey">Save</button>${S.data.ai.enabled ? '<button class="btn ghost" id="rmkey">Remove</button>' : ''}</div>
-      <small class="muted">${S.data.hosted ? 'Stored in this app\'s private storage on Netlify; it is never sent to the browser.' : 'Stored only in the data folder on this computer.'} Usage is billed to your Anthropic account.</small></section>
-    <section class="panel"><h3>Calendar</h3>
+      <small class="muted">${S.data.hosted ? 'Stored in this app\'s private storage on Netlify; it is never sent to the browser.' : 'Stored only in the data folder on this computer.'} One key is used for all your brands. Usage is billed to your Anthropic account.</small></section>
+    <section class="panel"><h3>Calendar: ${esc(S.data.brand.name || 'this brand')}</h3>
       <label>Canadian holidays shown</label>
       <label class="check"><input type="checkbox" data-r="federal" ${r.federal ? 'checked' : ''}> Federal statutory holidays</label>
       <label class="check"><input type="checkbox" data-r="quebec" ${r.quebec ? 'checked' : ''}> Quebec (Fête nationale, Easter Monday)</label>

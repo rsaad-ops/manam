@@ -1,12 +1,15 @@
 // @ts-nocheck
 // The scheduler: runs every minute, hands each due post to the background worker.
 import type { Config, Context } from "@netlify/functions";
-import { LATE_LIMIT_HOURS, configured, env, getJSON, loadAll, nowIso, remove, savePost, startWork } from "../lib/store.mts";
+import { LATE_LIMIT_HOURS, brandIds, configured, env, getJSON, loadAll, nowIso, remove, savePost, startWork } from "../lib/store.mts";
 
 export default async (_req: Request, context: Context) => {
   if (!configured()) return;
   const origin = (env("URL") || context.site?.url || "").replace(/\/+$/, "");
-  const { posts } = await loadAll(), now = Date.now();
+  const now = Date.now();
+  // Every brand's scheduled posts are published with that brand's own channels.
+  for (const bid of await brandIds()) {
+  const { posts, px } = await loadAll(bid);
   for (const p of posts) {
     try {
       if (p.status === "publishing" && now - (p.publishingSince || 0) > 20 * 60000) {
@@ -16,20 +19,21 @@ export default async (_req: Request, context: Context) => {
         for (const c of p.channels || []) if (!p.results[c]) p.results[c] = { ok: false, error: "Publishing was interrupted. Check the channel before retrying.", at: nowIso() };
         p.status = oks.some(Boolean) ? "partial" : "failed";
         delete p.publishingSince;
-        await savePost(p);
+        await savePost(px, p);
         continue;
       }
       if (p.status !== "scheduled" || !p.scheduledAt) continue;
       const when = Date.parse(p.scheduledAt.slice(0, 19) + "Z");
       if (!Number.isFinite(when) || when > now) continue;
       // Read the post again right before acting, in case it was just edited.
-      const cur = await getJSON("post/" + p.id);
+      const cur = await getJSON(px + "post/" + p.id);
       if (!cur || cur.status !== "scheduled" || cur.scheduledAt !== p.scheduledAt) continue;
-      if (now - when > LATE_LIMIT_HOURS * 3600000) { cur.status = "missed"; await savePost(cur); continue; }
+      if (now - when > LATE_LIMIT_HOURS * 3600000) { cur.status = "missed"; await savePost(px, cur); continue; }
       Object.assign(cur, { status: "publishing", publishingSince: now, results: cur.results || {} });
-      await savePost(cur);
-      await startWork(origin, { publish: cur.id, onlyFailed: false });
+      await savePost(px, cur);
+      await startWork(origin, { publish: cur.id, brand: bid, onlyFailed: false });
     } catch (e) { console.error("post", p.id, e); }
+  }
   }
   // Clear out abandoned AI jobs and sign-in attempts.
   try {

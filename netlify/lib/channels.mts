@@ -1,6 +1,6 @@
 // @ts-nocheck
 // Publishing to Facebook, Instagram, LinkedIn and YouTube, plus their sign-in flows.
-import { ApiError, apiErrorText, chan, getJSON, getPost, http, mediaSig, nowIso, readAsset, remove, savePost, saveSecrets, setJSON, newId } from "./store.mts";
+import { ApiError, DEFAULT_ID, apiErrorText, chan, getJSON, getPost, http, loadSecrets, mediaSig, nowIso, prefix, readAsset, remove, savePost, saveSecrets, setJSON, newId } from "./store.mts";
 
 const need = (cfg, ...keys) => { for (const k of keys) if (!cfg[k]) throw new ApiError("Channel is not connected."); };
 const needApp = (cfg, ...keys) => { for (const k of keys) if (!cfg[k]) throw new ApiError("Save the app credentials for this channel first."); };
@@ -42,7 +42,7 @@ async function publishInstagram(ctx, post, caption, media) {
   } else {
     // Instagram downloads the image itself, through a signed link that only works for this file.
     const base = (ctx.settings.publicMediaUrl || "").replace(/\/+$/, "");
-    const imageUrl = base ? `${base}/${media.file}` : `${ctx.origin}/uploads/${media.file}?sig=${mediaSig(media.file)}`;
+    const imageUrl = base ? `${base}/${media.file}` : `${ctx.origin}/uploads/${media.file}?sig=${mediaSig(media.file)}${ctx.px ? "&b=" + ctx.bid : ""}`;
     const r = await http("POST", `${g}${ig}/media`, { form: { image_url: imageUrl, caption, access_token: token } });
     if (r.status >= 400) throw new ApiError(apiErrorText(r.parsed));
     container = r.parsed.id;
@@ -122,7 +122,7 @@ export const PUBLISHERS = { facebook: publishFacebook, instagram: publishInstagr
 
 // Publish a post that has already been marked "publishing". Channels that succeeded before are never posted twice.
 export async function publishPost(ctx, postId, onlyFailed = false) {
-  const post = await getPost(postId);
+  const post = await getPost(ctx.px, postId);
   if (!post || post.status !== "publishing") return post;
   post.results = post.results || {};
   const media = (post.mediaIds || []).length ? ctx.assets.find((a) => a.id === post.mediaIds[0]) : null;
@@ -133,18 +133,18 @@ export async function publishPost(ctx, postId, onlyFailed = false) {
     try { res = { ...(await PUBLISHERS[ch](ctx, post, caption, media)), ok: true, at: nowIso() }; }
     catch (e) { if (!(e instanceof ApiError)) console.error(e); res = { ok: false, error: e instanceof ApiError ? e.message : `Unexpected error: ${e.message}`, at: nowIso() }; }
     post.results[ch] = res;
-    await savePost(post);
+    await savePost(ctx.px, post);
   }
   const oks = (post.channels || []).map((ch) => !!post.results[ch]?.ok);
   post.status = oks.length && oks.every(Boolean) ? "published" : oks.some(Boolean) ? "partial" : "failed";
   if (oks.some(Boolean)) post.publishedAt = nowIso();
   delete post.publishingSince;
-  await savePost(post);
+  await savePost(ctx.px, post);
   return post;
 }
 
 // ------------------------------------------------------------------- OAuth
-export async function oauthStart(secrets, platform, origin) {
+export async function oauthStart(secrets, platform, origin, bid = DEFAULT_ID) {
   const state = newId() + newId(), redirect = `${origin}/oauth/callback/${platform}`;
   const q = (o) => new URLSearchParams(o).toString();
   let url;
@@ -161,7 +161,7 @@ export async function oauthStart(secrets, platform, origin) {
     url = "https://accounts.google.com/o/oauth2/v2/auth?" + q({ client_id: c.client_id, redirect_uri: redirect, response_type: "code", state, access_type: "offline", prompt: "consent",
       scope: "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly" });
   } else throw new ApiError("Unknown channel.", 404);
-  await setJSON("oauth/" + state, { platform, at: Date.now() });
+  await setJSON("oauth/" + state, { platform, brand: bid, at: Date.now() });
   return url;
 }
 
@@ -173,11 +173,13 @@ export function selectPage(secrets, pageId) {
   if (ig) Object.assign(chan(secrets, "instagram"), { ig_user_id: ig.id, username: ig.username || "", token: page.access_token });
 }
 
-export async function oauthCallback(secrets, platform, q, origin) {
+export async function oauthCallback(platform, q, origin) {
   if (q.error) throw new ApiError(q.error_description || q.error);
   const saved = q.state && /^[0-9a-f]+$/.test(q.state) ? await getJSON("oauth/" + q.state) : null;
   if (saved) await remove("oauth/" + q.state);
   if (!saved || saved.platform !== platform || Date.now() - saved.at > 15 * 60000 || !q.code) throw new ApiError("This sign-in link is no longer valid. Start again from the Channels page.");
+  // The channel is connected to the brand the sign-in was started from.
+  const px = prefix(saved.brand), secrets = await loadSecrets(px);
   const redirect = `${origin}/oauth/callback/${platform}`, qs = (o) => new URLSearchParams(o).toString();
   if (platform === "facebook") {
     const c = chan(secrets, "facebook"), g = "https://graph.facebook.com/";
@@ -209,10 +211,10 @@ export async function oauthCallback(secrets, platform, q, origin) {
     const ch = await http("GET", "https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true", { headers: { Authorization: "Bearer " + tok.parsed.access_token } });
     c.channel_name = ch.parsed.items?.[0]?.snippet?.title || "";
   } else throw new ApiError("Unknown channel.", 404);
-  await saveSecrets(secrets);
+  await saveSecrets(px, secrets);
 }
 
-export async function testChannel(secrets, platform) {
+export async function testChannel(px, secrets, platform) {
   if (platform === "facebook") {
     const c = chan(secrets, "facebook"); need(c, "page_id", "page_token");
     const r = await http("GET", `https://graph.facebook.com/${c.page_id}?fields=name&access_token=${encodeURIComponent(c.page_token)}`);
@@ -234,7 +236,7 @@ export async function testChannel(secrets, platform) {
     if (r.status >= 400) throw new ApiError(apiErrorText(r.parsed));
     chan(secrets, "youtube").channel_name = r.parsed.items?.[0]?.snippet?.title || "";
   } else throw new ApiError("Unknown channel.", 404);
-  await saveSecrets(secrets);
+  await saveSecrets(px, secrets);
 }
 
 export const CHANNEL_FIELDS = {

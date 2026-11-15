@@ -1,5 +1,5 @@
 // Studio: on-brand image designer and reel maker, rendered in the browser.
-import { S, $, $$, api, esc, toast, guard, asset, photos, pickAsset, loadImage, uploadFile, thumb } from './core.js';
+import { S, $, $$, api, esc, toast, guard, asset, photos, pickAsset, loadImage, uploadFile, thumb, isDefaultBrand } from './core.js';
 import { openComposer } from './composer.js';
 
 export const FORMATS = {
@@ -10,6 +10,8 @@ export const FORMATS = {
   youtube: { w: 1280, h: 720, label: '16:9 · YouTube thumbnail' },
 };
 export const TEMPLATES = { bold: 'Bold', photo: 'Photo', split: 'Split', quote: 'Quote', festive: 'Festive' };
+// The graphic shape used across the templates. The speech bubble is UPSMRT's own; client brands pick theirs.
+export const MOTIFS = { bubble: 'Speech bubble', circle: 'Circle', block: 'Block', slash: 'Slash', none: 'None' };
 
 const FONTS = ['Avenir Next', 'Helvetica Neue', 'Futura', 'Gill Sans', 'Georgia', 'Didot', 'Optima', 'Arial', 'Verdana', 'Trebuchet MS'];
 export const fontList = () => FONTS;
@@ -21,15 +23,26 @@ function luminance(hex) {
   const n = parseInt(m[1], 16);
   return (0.299 * (n >> 16) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255;
 }
-const onColor = (hex) => (luminance(hex) > 0.6 ? '#1A1B4E' : '#FFFFFF');
+const ink = () => { const c = S.data.brand.colors; return luminance(c.text) < 0.5 ? c.text : luminance(c.primary) < 0.5 ? c.primary : '#1A1B2E'; };
+const onColor = (hex) => (luminance(hex) > 0.6 ? ink() : '#FFFFFF');
+
+// A client brand with no logo file yet is shown as its name, set in its own typeface.
+function wordmark(text, color) {
+  const cv = document.createElement('canvas'), ctx = cv.getContext('2d'), size = 120, font = `800 ${size}px ${fontStack()}`;
+  ctx.font = font;
+  cv.width = Math.ceil(ctx.measureText(text).width) + 8; cv.height = Math.ceil(size * 1.2);
+  ctx.font = font; ctx.fillStyle = color; ctx.textBaseline = 'middle';
+  ctx.fillText(text, 4, cv.height / 2);
+  return cv;
+}
 
 export async function prepare(spec) {
   const b = S.data.brand;
-  const custom = asset(b.logoId);
+  const custom = asset(b.logoId), named = !custom && !isDefaultBrand(), name = b.name || 'Your brand';
   const [photo, logo, logoLight] = await Promise.all([
     loadImage(spec.photoId && asset(spec.photoId) ? asset(spec.photoId).url : ''),
-    loadImage(custom ? custom.url : '/img/logo.svg'),
-    loadImage(custom ? '' : '/img/logo-light.svg'),
+    named ? wordmark(name, ink()) : loadImage(custom ? custom.url : '/img/logo.svg'),
+    named ? wordmark(name, '#FFFFFF') : loadImage(custom ? '' : '/img/logo-light.svg'),
   ]);
   return { photo, logo, logoLight };
 }
@@ -85,15 +98,24 @@ function rrect(ctx, x, y, w, h, r) {
   ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
 }
 
-// the speech-bubble shape from the brand mark, used as a graphic device
+// the brand's graphic shape (UPSMRT: the speech bubble from its mark), used as a device across the templates
 function bubble(ctx, x, y, s, color, alpha) {
+  const motif = S.data.brand.motif || 'bubble';
+  if (motif === 'none') return;
   ctx.save();
   ctx.globalAlpha *= alpha;
   ctx.fillStyle = color;
-  rrect(ctx, x, y, s, s * 0.74, s * 0.12); ctx.fill();
-  ctx.beginPath();
-  ctx.moveTo(x + s * 0.15, y + s * 0.7); ctx.lineTo(x + s * 0.15, y + s * 1.08); ctx.lineTo(x + s * 0.42, y + s * 0.7);
-  ctx.closePath(); ctx.fill();
+  if (motif === 'circle') { ctx.beginPath(); ctx.arc(x + s / 2, y + s * 0.42, s * 0.48, 0, 7); ctx.fill(); }
+  else if (motif === 'block') { rrect(ctx, x, y, s, s * 0.86, s * 0.05); ctx.fill(); }
+  else if (motif === 'slash') {
+    ctx.beginPath(); ctx.moveTo(x + s * 0.34, y - s * 0.05); ctx.lineTo(x + s, y - s * 0.05); ctx.lineTo(x + s * 0.66, y + s * 0.92); ctx.lineTo(x, y + s * 0.92);
+    ctx.closePath(); ctx.fill();
+  } else {
+    rrect(ctx, x, y, s, s * 0.74, s * 0.12); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(x + s * 0.15, y + s * 0.7); ctx.lineTo(x + s * 0.15, y + s * 1.08); ctx.lineTo(x + s * 0.42, y + s * 0.7);
+    ctx.closePath(); ctx.fill();
+  }
   ctx.restore();
 }
 

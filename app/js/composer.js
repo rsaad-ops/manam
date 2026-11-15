@@ -2,6 +2,7 @@
 import { S, $, $$, api, esc, toast, guard, modal, confirmBox, pickAsset, asset, isVideo, isImage, uploadFile, thumb,
   CH, CH_KEYS, chBadge, ymd, hm, toUtc, fromUtc, niceDate, photos, STATUS } from './core.js';
 import { renderDesignToAsset } from './studio.js';
+import { dismissKey } from './suggest.js';
 
 export function openComposer(init = {}) {
   const existing = init.post;
@@ -158,7 +159,7 @@ export function openComposer(init = {}) {
 
   function payload(status) {
     return { caption: d.caption, captions: d.captions, channels: d.channels, title: d.title, topic: d.topic, holiday: d.holiday,
-      mediaIds: d.mediaId ? [d.mediaId] : [], scheduledAt: toUtc(d.date, d.time), status };
+      mediaIds: d.mediaId ? [d.mediaId] : [], scheduledAt: toUtc(d.date, d.time), status, ...(existing && existing.suggested ? { suggested: false } : {}) };
   }
   async function save(status) {
     if (!d.channels.length) throw new Error('Select at least one channel.');
@@ -201,7 +202,8 @@ export function openComposer(init = {}) {
   const del = $('#del', el);
   if (del) del.onclick = async () => {
     if (!(await confirmBox('Delete this post?', 'This removes it from the calendar. Anything already published stays on the social networks.', 'Delete', true))) return;
-    guard(async () => { await api('DELETE', 'posts/' + d.id); m.close(); });
+    // A post made for a key date is not suggested again once it has been deleted.
+    guard(async () => { await api('DELETE', 'posts/' + d.id); if (existing.keyDate) await dismissKey(existing.keyDate); m.close(); });
   };
   if (locked) $$('#sched,#now,#draft', el).forEach((b) => (b.disabled = true));
   refresh();
