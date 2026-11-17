@@ -23,8 +23,7 @@ Every type of date has its own colour and label. Click a type in the calendar le
 
 ## Client brands
 
-The **Client brand** menu at the top of the sidebar switches between brands and creates new ones. Each brand has its own brand kit (logo, colours, typeface, graphic shape, voice, guidelines, photos), library, calendar, key dates, data sources and channel connections. Nothing is shared between brands; only the AI key is common to all.
-A new brand can be started from its website address: the scan reads colours, logos, photos and text. Guidelines can be uploaded or linked. UPSMRT stays as the first brand and cannot be deleted.
+New brands cannot be added from the app. If more than one brand exists, the **Client brand** menu at the top of the sidebar switches between them; with only UPSMRT it is hidden. Each brand has its own brand kit (logo, colours, typeface, graphic shape, voice, guidelines, photos), library, calendar, key dates, data sources and channel connections. A brand other than UPSMRT can be deleted from its Brand kit page; UPSMRT cannot be deleted.
 
 ## Data sources
 

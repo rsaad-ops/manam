@@ -2,7 +2,7 @@
 // The app's API on Netlify: same routes as the local Python server, behind a sign-in.
 import type { Config, Context } from "@netlify/functions";
 import { createHash } from "node:crypto";
-import { AI_MODEL, ApiError, CHUNK, DEFAULT_BRAND, DEFAULT_ID, DEFAULT_SETTINGS, brandList, chan, checkPassword, configured, createBrand, deleteBrand, deleteMedia, getChunk,
+import { AI_MODEL, ApiError, CHUNK, DEFAULT_BRAND, DEFAULT_ID, DEFAULT_SETTINGS, brandList, chan, checkPassword, configured, deleteBrand, deleteMedia, getChunk,
   getJSON, getPost, http, loadAll, loadSecrets, newId, nowIso, prefix, putChunk, remove, resolveBrand, savePost, saveSecrets, sessionCookie, setJSON, signedIn, startWork,
   validMediaSig } from "../lib/store.mts";
 import { aiKey, checkBrandKitRequest, checkKeyDateRequest, checkSourceRequest, generateTemplate, readLinkedDoc, scanSite } from "../lib/content.mts";
@@ -134,7 +134,6 @@ async function route(req, context) {
   if (res === "state" && method === "GET") return fresh();
 
   if (res === "brands") {
-    if (method === "POST" && !rid) { bid = await createBrand((await body(req)).name); return fresh(); }
     if (method === "DELETE" && rid) { await deleteBrand(rid); bid = DEFAULT_ID; return fresh(); }
   }
 

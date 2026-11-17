@@ -17,7 +17,6 @@ export const DEFAULT_BRAND = {
 // The first brand keeps its data under the plain keys; every other client brand has its own
 // separate set under "b/<id>/" (own kit, posts, library, settings and channel connections).
 export const DEFAULT_ID = "upsmrt";
-export const NEW_BRAND = { name: "", tagline: "", motif: "circle", colors: { primary: "#1F2A37", accent: "#2F80ED", light: "#FFFFFF", text: "#1F2A37" } };
 export const prefix = (bid) => (!bid || bid === DEFAULT_ID ? "" : `b/${bid}/`);
 export const DEFAULT_SETTINGS = {
   holidayRegions: { federal: true, quebec: false, provincial: false }, defaultTime: "09:00", publicMediaUrl: "",
@@ -57,14 +56,6 @@ export async function brandList() {
   const ids = await brandIds();
   const kits = await Promise.all(ids.map((id) => getJSON(prefix(id) + "brand", {})));
   return ids.map((id, i) => { const b = { ...DEFAULT_BRAND, ...kits[i] }; return { id, name: b.name || "Untitled brand", color: b.colors?.primary || "#1F2A37", accent: b.colors?.accent || "#2F80ED" }; });
-}
-export async function createBrand(input) {
-  const name = String(input || "").replace(/\s+/g, " ").trim().slice(0, 60);
-  if (!name) throw new ApiError("Give the brand a name.");
-  const id = `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24) || "brand"}-${randomBytes(2).toString("hex")}`;
-  await setJSON(prefix(id) + "brand", { ...DEFAULT_BRAND, ...NEW_BRAND, name });
-  await setJSON("brands", [...(await getJSON("brands", [])), { id, createdAt: nowIso() }]);
-  return id;
 }
 export async function deleteBrand(id) {
   const list = await getJSON("brands", []);

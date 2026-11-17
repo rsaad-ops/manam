@@ -76,8 +76,6 @@ DEFAULT_DB = {
 # The first brand keeps its data at the top of db.json; every other client brand has its own
 # separate block under "brands" (own kit, posts, library, settings and channel connections).
 DEFAULT_ID = "upsmrt"
-NEW_BRAND = {"name": "", "tagline": "", "motif": "circle",
-             "colors": {"primary": "#1F2A37", "accent": "#2F80ED", "light": "#FFFFFF", "text": "#1F2A37"}}
 CTX = threading.local()
 
 
@@ -156,20 +154,6 @@ def brand_list():
     return [{"id": b, "name": ws["brand"].get("name") or "Untitled brand",
              "color": ws["brand"]["colors"].get("primary", "#1F2A37"), "accent": ws["brand"]["colors"].get("accent", "#2F80ED")}
             for b, ws in workspaces()]
-
-
-def create_brand(name):
-    name = re.sub(r"\s+", " ", str(name or "")).strip()[:60]
-    if not name:
-        raise ApiError("Give the brand a name.")
-    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:24] or "brand"
-    new_id = "%s-%s" % (slug, uuid.uuid4().hex[:4])
-    ws = fill_defaults({"brand": dict(json.loads(json.dumps(NEW_BRAND)), name=name)})
-    ws.pop("brands", None)
-    with LOCK:
-        DB["brands"][new_id] = ws
-        save_db()
-    return new_id
 
 
 def delete_brand(b):
@@ -1572,9 +1556,6 @@ class Handler(BaseHTTPRequestHandler):
             return state()
 
         if res == "brands":
-            if method == "POST" and not rid:
-                CTX.brand = create_brand(self.json_body().get("name"))
-                return state()
             if method == "DELETE" and rid:
                 delete_brand(rid)
                 CTX.brand = DEFAULT_ID
