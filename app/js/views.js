@@ -36,7 +36,7 @@ export function renderDashboard(root) {
     { done: !!(d.brand.voice || d.brand.guidelinesText || d.assets.some((a) => a.kind === 'guideline')), label: 'Add brand guidelines and voice', to: 'brand' },
     { done: photos().length > 0, label: 'Upload brand photos', to: 'library' },
     { done: connected.length > 0, label: 'Connect your social channels', to: 'channels' },
-    { done: (d.settings.sources || []).length > 0, label: 'Add your industry lists: trade shows, publications, competitors (optional)', to: 'sources' },
+    { done: (d.settings.sources || []).length > 0, label: 'Add your industry lists: trade shows, publications, associations (optional)', to: 'sources' },
     { done: d.ai.enabled, label: 'Add an AI key for original copy (optional)', to: 'settings' },
   ];
   const todo = steps.filter((s) => !s.done);
@@ -302,7 +302,7 @@ export function renderBrand(root) {
       <label>Graphic shape in the visual templates</label><div class="seg" id="motif">${Object.entries(MOTIFS).map(([k, n]) => `<button class="${(b.motif || 'bubble') === k ? 'on' : ''}" data-motif="${k}">${n}</button>`).join('')}</div>
     </section>
     <section class="panel"><h3>Industry data sources <span class="muted">${nsrc}</span></h3>
-      <p class="muted">Upload or link this brand's lists of industry publications, trade shows, competitors and associations. The assistant reads them and proposes key dates for the calendar.</p>
+      <p class="muted">Upload or link this brand's lists of industry publications, trade shows and associations. The assistant reads them and proposes key dates for the calendar.</p>
       <button class="btn" data-gosrc>${nsrc ? 'Manage data sources' : 'Add data sources'}</button>
     </section></div><div>
     <section class="panel"><h3>Voice</h3>

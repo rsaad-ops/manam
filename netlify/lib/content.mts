@@ -286,10 +286,10 @@ export async function suggestKeyDates(db, req) {
 }
 
 // ------------------------------------------------------------- data sources
-// Lists the brand supplies (publications, trade shows, competitors, associations): the server reads
+// Lists the brand supplies (publications, trade shows, associations): the server reads
 // the file or link, visits the websites it lists, and asks Claude for the dated events it can find.
-const SOURCE_TYPES = { publications: "Industry publications", tradeshows: "Trade shows", competitors: "Competitors", associations: "Industry associations", other: "Other sources" };
-const SOURCE_CATS = ["tradeshow", "publication", "association", "competitor", "industry", "awareness"];
+const SOURCE_TYPES = { publications: "Industry publications", tradeshows: "Trade shows", associations: "Industry associations", other: "Other sources" };
+const SOURCE_CATS = ["tradeshow", "publication", "association", "industry", "awareness"];
 const EVENT_LINK = /event|calendar|agenda|conference|congress|summit|show|expo|editorial|media-?kit|deadline|webinar|award|schedule|dates|evenement|calendrier|salon/i;
 const PRIVATE_HOST = /^(localhost$|.*\.local$|.*\.internal$|127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|0\.|\[?::1\]?$|\[?f[cd][0-9a-f]{2}:)/i;
 
@@ -440,7 +440,7 @@ function cleanDates(items, start, end, srcId = "", defaultCat = "industry", cats
     const cat = cats.includes(d.category) ? d.category : defaultCat, conf = ["high", "medium", "low"].includes(d.confidence) ? d.confidence : "low";
     const url = String(d.sourceUrl || "").slice(0, 300), last = String(d.endDate || "").slice(0, 10);
     out.push({ id: `${srcId ? "s" : "ai"}${Date.now().toString(16)}${i}`, date, name, cat, source: srcId ? "source" : "ai", sourceId: srcId, conf, approx: conf !== "high",
-      internal: !!d.internal || cat === "competitor", entity: String(d.entity || "").slice(0, 80), url: /^https?:\/\//.test(url) ? url : "", end: realDay(last) && last > date ? last : "",
+      internal: !!d.internal, entity: String(d.entity || "").slice(0, 80), url: /^https?:\/\//.test(url) ? url : "", end: realDay(last) && last > date ? last : "",
       where: String(d.where || "").slice(0, 80), when: String(d.when || "").slice(0, 80), msg: String(d.message || "").slice(0, 600), head: String(d.headline || "").slice(0, 60), sub: String(d.subline || "").slice(0, 90) });
   });
   return out;
@@ -475,12 +475,11 @@ export async function scanSource(db, req) {
     + `The brand supplied a data source of type '${SOURCE_TYPES[src.type] || "Other sources"}'. Its content, and the web pages it points to, follow below${pdfs.length ? " (the attached PDF is part of the source)" : ""}.\n`
     + `Task: list every dated event between ${start} and ${end} that belongs on the brand's social media calendar.\n`
     + "category is one of: 'tradeshow' (trade shows, expos), 'publication' (issue dates, editorial and advertising deadlines, report releases), "
-    + "'association' (association events, conferences, awareness days and weeks), 'competitor' (competitor events, launches, webinars), 'industry' (other conferences and sector deadlines), 'awareness'.\n"
+    + "'association' (association events, conferences, awareness days and weeks), 'industry' (other conferences and sector deadlines), 'awareness'.\n"
     + DATE_RULES
-    + "internal is true for editorial, advertising and submission deadlines and for every competitor item: these are reminders for the team, never posts.\n"
-    + "message: for a public item, a short publishable key message in the brand's voice; for an internal item, a one-line reminder for the team; "
-    + "for a competitor item, a message the brand could post that week about its own strengths that never names or alludes to the competitor.\n"
-    + "entity is the publication, show, association or competitor the item belongs to. sourceUrl is the page the date came from, or empty.\n"
+    + "internal is true for editorial, advertising and submission deadlines: these are reminders for the team, never posts. Leave out events organised by competitors.\n"
+    + "message: for a public item, a short publishable key message in the brand's voice; for an internal item, a one-line reminder for the team.\n"
+    + "entity is the publication, show or association the item belongs to. sourceUrl is the page the date came from, or empty.\n"
     + `Skip these, already on the calendar: ${JSON.stringify(known)}.\n`
     + 'Return ONLY JSON: {"dates":[{"date":"YYYY-MM-DD","endDate":"YYYY-MM-DD or empty","name":"...","category":"...","entity":"...","sourceUrl":"...","confidence":"high|medium|low","internal":false,'
     + '"where":"city or empty","when":"usual timing or empty","message":"...","headline":"...","subline":"..."}],"unknown":["names listed in the source for which no date could be found"]}\n\n' + material;

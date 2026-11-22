@@ -33,11 +33,11 @@ function phases(it, v = 0) {
   ];
 }
 
-// Every suggestion that should exist for the coming weeks. Internal dates (deadlines, competitors) never become posts.
+// Every suggestion that should exist for the coming weeks. Internal dates (such as deadlines) never become posts.
 function wanted() {
   const today = ymd(new Date()), limit = addDays(today, HORIZON), out = [];
   keyDates(addDays(today, -12), addDays(limit, 10)).forEach((it, i) => {
-    if (it.internal || it.cat === 'competitor') return;
+    if (it.internal) return;
     phases(it).forEach((ph) => { if (ph.date > today && ph.date <= limit) out.push({ skey: `${it.key}:${ph.phase}`, it, i, ...ph }); });
   });
   return out;

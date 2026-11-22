@@ -1,5 +1,5 @@
 // Key dates. The only dates built into the app are Canadian and US holidays. Every other date
-// (trade shows, publications, associations, competitors, industry events) comes from the brand's
+// (trade shows, publications, associations, industry events) comes from the brand's
 // own data sources, uploaded or linked on the Data sources page, or is typed in by hand.
 // Every type has its own colour and label, and can be switched on and off.
 import { S, $, $$, api, esc, toast, guard, modal, confirmBox, pad, ymd, toUtc, postDay, photos, go } from './core.js';
@@ -15,10 +15,9 @@ const BASE_CATS = {
   tradeshow: { label: 'Trade shows', color: '#7A3FC4' },
   publication: { label: 'Publications & reports', color: '#0E8FA3' },
   association: { label: 'Industry associations', color: '#B4531A' },
-  competitor: { label: 'Competitors (internal)', color: '#5B6470' },
   custom: { label: 'Your own dates', color: '#D6336C' },
 };
-const CAT_DEFAULT = { canada: true, us: true, awareness: true, industry: true, tradeshow: true, publication: true, association: true, competitor: true, custom: true };
+const CAT_DEFAULT = { canada: true, us: true, awareness: true, industry: true, tradeshow: true, publication: true, association: true, custom: true };
 export const PALETTE = ['#0B7285', '#9C36B5', '#E8590C', '#2B8A3E', '#C2255C', '#364FC7', '#866118', '#087F5B'];
 
 // Built-in categories plus the ones added by hand for this brand.
@@ -78,7 +77,6 @@ export function compose(cat, name, year, o, v = 0) {
   if (cat === 'tradeshow') return { msg: fill(`${name} ${year} is coming up${at}. Going? Tell us what is on your list: {B} will share the ideas worth bringing back.`), head: `${short} ${year}`, sub: o.where || 'The ideas worth bringing back' };
   if (cat === 'publication') return { msg: fill(alt ? `${name} ${year} is expected around now. What do you hope it covers? {B} will share the points that matter.` : `${name} ${year} is due out around now. {B} will be reading it closely and sharing the takeaways that matter for leaders.`), head: short, sub: 'Our key takeaways' };
   if (cat === 'association') return { msg: fill(alt ? `${name} is almost here${at}. What are you hoping to take away from it? {B} would like to hear.` : `${name} is coming up${at}. {B} will be following along. Who else is taking part?`), head: short, sub: 'Who else is taking part?' };
-  if (cat === 'competitor') return { msg: fill(`A reminder of what sets {B} apart: ${S.data.brand.tagline || 'the way we work with our clients'}.`), head: fill(S.data.brand.tagline || '{B}'), sub: fill('{B}') };
   return { msg: fill(alt ? `${name}${at}: mark the date. More from {B} soon.` : `${name} is coming up${at}. What does it mean for you? Tell us: the {B} team would like to hear.`), head: short, sub: fill('From {B}') };
 }
 
@@ -110,7 +108,7 @@ export function keyDates(from, to, opts = {}) {
     if (!cats[cc]) return;
     const t = compose(cc, c.name, c.date.slice(0, 4), { where: c.where });
     out.push({ key: c.id, cat: cc, name: c.name, date: c.date, end: c.end || '', approx: !!c.approx, when: c.when || '', where: c.where || '', solemn: false, tags: ['all'], custom: true,
-      source: c.source || 'user', internal: !!c.internal || cc === 'competitor', entity: c.entity || '', url: c.url || '', opts: { where: c.where },
+      source: c.source || 'user', internal: !!c.internal, entity: c.entity || '', url: c.url || '', opts: { where: c.where },
       msg: c.msg || t.msg, head: c.head || (c.msg ? c.name : t.head), sub: c.sub || (c.msg ? '' : t.sub), own: !!c.msg });
   });
   return out.filter((it) => it.date >= from && it.date <= to).sort((a, b) => a.date.localeCompare(b.date) || a.name.localeCompare(b.name));
@@ -148,18 +146,16 @@ export async function postFromKeyDate(it, i = 0) {
   openComposer({ date: it.date, caption: it.msg, topic: it.name, mediaId: a.id });
 }
 
-// A date kept for the team only: an editorial deadline, or something a competitor is doing.
+// A date kept for the team only, such as an editorial or advertising deadline.
 export function openInternal(it) {
-  const rival = it.cat === 'competitor', dt = new Date(it.date + 'T12:00');
+  const dt = new Date(it.date + 'T12:00');
   const md = modal(`<div class="mhead"><h2>${esc(it.name)}</h2><button class="x" data-close>×</button></div>
     <div class="mbody"><p><span class="kd-tag" style="--c:${cat(it.cat).color}">${esc(cat(it.cat).label)}</span> <span class="kd-warn int">Internal — not a post</span></p>
       <p><b>${esc(dt.toLocaleDateString('en-CA', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }))}</b>${it.approx ? ' <span class="kd-warn">Confirm date</span>' : ''}</p>
       ${it.entity ? `<p class="muted">${esc(it.entity)}${it.where ? ' · ' + esc(it.where) : ''}</p>` : ''}
       ${it.url ? `<p><a href="${esc(it.url)}" target="_blank" rel="noopener">Open the source page</a></p>` : ''}
-      <label>${rival ? 'A message you could post that week (it never names the competitor)' : 'Reminder for the team'}</label><p class="kd-msg">${esc(it.msg)}</p></div>
-    <div class="mfoot"><span class="grow"></span><button class="btn" data-close>Close</button>${rival ? '<button class="btn primary" id="kdint">Write this post</button>' : ''}</div>`, 'small');
-  const b = $('#kdint', md.el);
-  if (b) b.onclick = () => guard(async () => { md.close(); await postFromKeyDate({ ...it, name: S.data.brand.name || 'Our approach', head: it.head || S.data.brand.name }); }, b);
+      <label>Reminder for the team</label><p class="kd-msg">${esc(it.msg)}</p></div>
+    <div class="mfoot"><span class="grow"></span><button class="btn" data-close>Close</button></div>`, 'small');
 }
 
 // -------------------------------------------------------------------- panel
@@ -171,7 +167,7 @@ export function openKeyDates(start = new Date()) {
   const md = modal(`<div class="mhead"><h2>Key dates</h2><span class="muted">Canadian and US holidays, plus the dates from your data sources</span><button class="x" data-close>×</button></div>
     <div class="mbody kd-body">
       <div id="kdpending"></div>
-      <div class="kd-intro"><p class="muted">Only Canadian and US holidays are built in. Trade shows, publications, associations, competitors and other industry dates come from the lists you upload or link under <a href="#/sources" data-gosrc>Data sources</a>, or from dates you add below.</p>
+      <div class="kd-intro"><p class="muted">Only Canadian and US holidays are built in. Trade shows, publications, associations and other industry dates come from the lists you upload or link under <a href="#/sources" data-gosrc>Data sources</a>, or from dates you add below.</p>
         <div class="seg" id="kdspan">${[[1, MONTHS[first.getMonth()]], [3, '3 months'], [12, '12 months']].map(([n, l]) => `<button data-n="${n}">${l}</button>`).join('')}</div></div>
       <div class="kd-cathead"><label>Types of dates <span class="muted">— click to show or hide</span></label>
         <span><button class="btn sm ghost" data-all="1">Select all</button><button class="btn sm ghost" data-all="">Clear all</button></span></div>

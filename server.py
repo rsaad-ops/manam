@@ -589,12 +589,12 @@ def suggest_key_dates(req):
 
 
 # ---------------------------------------------------------------- Data sources
-# Lists the brand supplies (publications, trade shows, competitors, associations): the server reads
+# Lists the brand supplies (publications, trade shows, associations): the server reads
 # the file or link, visits the websites it lists, and asks Claude for the dated events it can find.
 
-SOURCE_TYPES = {"publications": "Industry publications", "tradeshows": "Trade shows", "competitors": "Competitors",
+SOURCE_TYPES = {"publications": "Industry publications", "tradeshows": "Trade shows",
                 "associations": "Industry associations", "other": "Other sources"}
-SOURCE_CATS = ("tradeshow", "publication", "association", "competitor", "industry", "awareness")
+SOURCE_CATS = ("tradeshow", "publication", "association", "industry", "awareness")
 EVENT_LINK = re.compile(r"event|calendar|agenda|conference|congress|summit|show|expo|editorial|media-?kit|deadline|webinar|award"
                         r"|schedule|dates|evenement|calendrier|salon", re.I)
 PRIVATE_HOST = re.compile(r"^(localhost$|.*\.local$|.*\.internal$|127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|0\.|::1$)", re.I)
@@ -776,7 +776,7 @@ def clean_dates(items, start, end, src_id="", default_cat="industry", cats=SOURC
         url, last = str(d.get("sourceUrl", ""))[:300], str(d.get("endDate", ""))[:10]
         out.append({"id": "%s%x%d" % ("s" if src_id else "ai", int(time.time() * 1000), i), "date": date, "name": name, "cat": cat,
                     "source": "source" if src_id else "ai", "sourceId": src_id, "conf": conf, "approx": conf != "high",
-                    "internal": bool(d.get("internal")) or cat == "competitor", "entity": str(d.get("entity", ""))[:80],
+                    "internal": bool(d.get("internal")), "entity": str(d.get("entity", ""))[:80],
                     "url": url if re.match(r"^https?://", url) else "", "end": last if real_day(last) and last > date else "",
                     "where": str(d.get("where", ""))[:80], "when": str(d.get("when", ""))[:80],
                     "msg": str(d.get("message", ""))[:600], "head": str(d.get("headline", ""))[:60], "sub": str(d.get("subline", ""))[:90]})
@@ -817,12 +817,11 @@ def scan_source(req):
         "The brand supplied a data source of type '%s'. Its content, and the web pages it points to, follow below%s.\n"
         "Task: list every dated event between %s and %s that belongs on the brand's social media calendar.\n"
         "category is one of: 'tradeshow' (trade shows, expos), 'publication' (issue dates, editorial and advertising deadlines, report releases), "
-        "'association' (association events, conferences, awareness days and weeks), 'competitor' (competitor events, launches, webinars), "
+        "'association' (association events, conferences, awareness days and weeks), "
         "'industry' (other conferences and sector deadlines), 'awareness'.\n%s"
-        "internal is true for editorial, advertising and submission deadlines and for every competitor item: these are reminders for the team, never posts.\n"
-        "message: for a public item, a short publishable key message in the brand's voice; for an internal item, a one-line reminder for the team; "
-        "for a competitor item, a message the brand could post that week about its own strengths that never names or alludes to the competitor.\n"
-        "entity is the publication, show, association or competitor the item belongs to. sourceUrl is the page the date came from, or empty.\n"
+        "internal is true for editorial, advertising and submission deadlines: these are reminders for the team, never posts. Leave out events organised by competitors.\n"
+        "message: for a public item, a short publishable key message in the brand's voice; for an internal item, a one-line reminder for the team.\n"
+        "entity is the publication, show or association the item belongs to. sourceUrl is the page the date came from, or empty.\n"
         "Skip these, already on the calendar: %s.\n"
         "Return ONLY JSON: {\"dates\":[{\"date\":\"YYYY-MM-DD\",\"endDate\":\"YYYY-MM-DD or empty\",\"name\":\"...\",\"category\":\"...\",\"entity\":\"...\","
         "\"sourceUrl\":\"...\",\"confidence\":\"high|medium|low\",\"internal\":false,\"where\":\"city or empty\",\"when\":\"usual timing or empty\","

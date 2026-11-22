@@ -27,8 +27,8 @@ New brands cannot be added from the app. If more than one brand exists, the **Cl
 
 ## Data sources
 
-**Data sources** holds a brand's lists of industry publications, trade shows, competitors and associations: uploaded files (PDF, Word, Excel, CSV, text) or links (web page, Google Drive file or folder, Docs, Sheets, Dropbox, OneDrive; shared with "anyone with the link"). *Read now* has the assistant read the source, visit the websites it lists, and propose dated events. This needs an AI key.
-Proposed dates wait in **Dates to review**: correct, accept or reject each one. A date is marked as stated on the source, or as needing confirmation. Editorial deadlines and competitor activity are kept as internal reminders (🔒 on the calendar) and never become posts.
+**Data sources** holds a brand's lists of industry publications, trade shows and associations: uploaded files (PDF, Word, Excel, CSV, text) or links (web page, Google Drive file or folder, Docs, Sheets, Dropbox, OneDrive; shared with "anyone with the link"). *Read now* has the assistant read the source, visit the websites it lists, and propose dated events. This needs an AI key.
+Proposed dates wait in **Dates to review**: correct, accept or reject each one. A date is marked as stated on the source, or as needing confirmation. Editorial and advertising deadlines are kept as internal reminders (🔒 on the calendar) and never become posts.
 
 ## Suggested posts
 

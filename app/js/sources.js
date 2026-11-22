@@ -1,11 +1,11 @@
-// Data sources: the brand's own lists of industry publications, trade shows, competitors and
+// Data sources: the brand's own lists of industry publications, trade shows and
 // associations, uploaded as files or linked from a shared drive. The assistant reads each source and
 // the websites it lists, and proposes dated events. Nothing reaches the calendar before it is reviewed.
 import { S, $, $$, api, esc, toast, guard, confirmBox, uploadFile, ymd, niceDate, go } from './core.js';
 import { kdSettings, saveKd, keyDates, catMap, cat, catKeys, dateSig } from './keydates.js';
 
-const TYPES = { tradeshows: 'Trade shows', publications: 'Industry publications', associations: 'Industry associations', competitors: 'Competitors', other: 'Other sources' };
-const TYPE_CAT = { tradeshows: 'tradeshow', publications: 'publication', associations: 'association', competitors: 'competitor', other: 'industry' };
+const TYPES = { tradeshows: 'Trade shows', publications: 'Industry publications', associations: 'Industry associations', other: 'Other sources' };
+const TYPE_CAT = { tradeshows: 'tradeshow', publications: 'publication', associations: 'association', other: 'industry' };
 const CONF = { high: ['Date stated on the source', 'good'], medium: ['Confirm date', ''], low: ['Estimated date — confirm', ''] };
 const ui = { type: 'tradeshows', status: '', busy: false };
 
@@ -15,7 +15,7 @@ const saveSources = (list, quiet) => api('PUT', 'settings', { sources: list }, {
 export function renderSources(root) {
   const list = sources(), k = kdSettings(), ai = S.data.ai.enabled, map = catMap(), pending = [...k.pending].sort((a, b) => a.date.localeCompare(b.date));
   const sure = pending.filter((d) => d.conf === 'high').length;
-  root.innerHTML = `<header class="page-head"><div><h1>Data sources</h1><p>Lists of publications, trade shows, competitors and associations for ${esc(S.data.brand.name || 'this brand')}. The assistant reads them, visits the websites they list, and proposes dates for the calendar.</p></div>
+  root.innerHTML = `<header class="page-head"><div><h1>Data sources</h1><p>Lists of publications, trade shows and associations for ${esc(S.data.brand.name || 'this brand')}. The assistant reads them, visits the websites they list, and proposes dates for the calendar.</p></div>
       <button class="btn primary" id="sall" ${list.length && !ui.busy ? '' : 'disabled'}>Read all sources</button></header>
     ${ai ? '' : '<div class="banner bad">Reading sources needs an Anthropic API key. You can add and organise sources now; add the key in <a href="#/settings">Settings</a> to have them read.</div>'}
     <section class="panel"><h3>Add a source</h3>
@@ -98,7 +98,7 @@ export function renderSources(root) {
       if (!d.date || !d.name) throw new Error('Each date needs a day and a name.');
       // a date corrected by hand counts as confirmed
       return { id: d.id, date: d.date, name: d.name, cat: d.cat, source: 'source', approx: d.fixed ? false : d.conf !== 'high', when: d.when || '', where: d.where || '', msg: d.msg || '', head: d.head || '', sub: d.sub || '',
-        internal: !!d.internal || d.cat === 'competitor', entity: d.entity || '', url: d.url || '', end: d.fixed ? '' : d.end || '' };
+        internal: !!d.internal, entity: d.entity || '', url: d.url || '', end: d.fixed ? '' : d.end || '' };
     });
     await saveKd({ custom: [...k2.custom, ...add], pending: k2.pending.filter((d) => !ids.has(d.id)), cats: { ...k2.cats, ...Object.fromEntries(add.map((d) => [d.cat, true])) } });
     toast(`${add.length} date${add.length > 1 ? 's' : ''} added to the calendar.`);
