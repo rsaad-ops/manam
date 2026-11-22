@@ -20,7 +20,7 @@ export const DEFAULT_ID = "upsmrt";
 export const prefix = (bid) => (!bid || bid === DEFAULT_ID ? "" : `b/${bid}/`);
 export const DEFAULT_SETTINGS = {
   holidayRegions: { federal: true, quebec: false, provincial: false }, defaultTime: "09:00", publicMediaUrl: "",
-  keyDates: { cats: { canada: true, us: false, awareness: true, industry: true, tradeshow: true, publication: true }, custom: [], overrides: {} },
+  keyDates: { cats: { canada: true, us: true, awareness: true, industry: true, tradeshow: true, publication: true }, custom: [], overrides: {} },
   sources: [],
 };
 

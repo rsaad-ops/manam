@@ -67,7 +67,7 @@ DEFAULT_DB = {
         "holidayRegions": {"federal": True, "quebec": False, "provincial": False},
         "defaultTime": "09:00",
         "publicMediaUrl": "",
-        "keyDates": {"cats": {"canada": True, "us": False, "awareness": True, "industry": True,
+        "keyDates": {"cats": {"canada": True, "us": True, "awareness": True, "industry": True,
                               "tradeshow": True, "publication": True},
                      "custom": [], "overrides": {}},
         "sources": [],

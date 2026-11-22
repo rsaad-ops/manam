@@ -334,3 +334,5 @@ details ul { margin: 6px 0; padding-left: 18px; font-size: 12.5px; }
 .rv-main { flex: 1; min-width: 0; display: grid; gap: 8px; } .rv-main .rv-date { flex: 0 0 150px; } .rv-main .rv-cat { flex: 0 0 210px; }
 .rv-row .kd-msg { margin: 0; }
 @media (max-width: 720px) { .src-row, .rv-row { flex-wrap: wrap; } .sg-row .kd-act { max-width: none; } }
+.kd-intro { display: flex; gap: 14px; align-items: flex-start; justify-content: space-between; margin-bottom: 4px; } .kd-intro p { margin: 0; max-width: 640px; }
+@media (max-width: 720px) { .kd-intro { flex-direction: column; } }
