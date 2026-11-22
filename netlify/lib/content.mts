@@ -289,7 +289,8 @@ export async function suggestKeyDates(db, req) {
 // Lists the brand supplies (publications, trade shows, associations): the server reads
 // the file or link, visits the websites it lists, and asks Claude for the dated events it can find.
 const SOURCE_TYPES = { publications: "Industry publications", tradeshows: "Trade shows", associations: "Industry associations", other: "Other sources" };
-const SOURCE_CATS = ["tradeshow", "publication", "association", "industry", "awareness"];
+const SOURCE_CATS = ["tradeshow", "publication", "association", "industry"];
+const SOURCE_TYPE_CAT = { tradeshows: "tradeshow", publications: "publication", associations: "association", other: "industry" };
 const EVENT_LINK = /event|calendar|agenda|conference|congress|summit|show|expo|editorial|media-?kit|deadline|webinar|award|schedule|dates|evenement|calendrier|salon/i;
 const PRIVATE_HOST = /^(localhost$|.*\.local$|.*\.internal$|127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|0\.|\[?::1\]?$|\[?f[cd][0-9a-f]{2}:)/i;
 
@@ -474,8 +475,6 @@ export async function scanSource(db, req) {
   const prompt = `Brand: ${b.name || ""} (${b.tagline || ""}). Field: ${String(req.industry || "not specified").slice(0, 120)}. Today is ${nowIso().slice(0, 10)}.\n`
     + `The brand supplied a data source of type '${SOURCE_TYPES[src.type] || "Other sources"}'. Its content, and the web pages it points to, follow below${pdfs.length ? " (the attached PDF is part of the source)" : ""}.\n`
     + `Task: list every dated event between ${start} and ${end} that belongs on the brand's social media calendar.\n`
-    + "category is one of: 'tradeshow' (trade shows, expos), 'publication' (issue dates, editorial and advertising deadlines, report releases), "
-    + "'association' (association events, conferences, awareness days and weeks), 'industry' (other conferences and sector deadlines), 'awareness'.\n"
     + DATE_RULES
     + "internal is true for editorial, advertising and submission deadlines: these are reminders for the team, never posts. Leave out events organised by competitors.\n"
     + "message: for a public item, a short publishable key message in the brand's voice; for an internal item, a one-line reminder for the team.\n"
@@ -484,7 +483,9 @@ export async function scanSource(db, req) {
     + 'Return ONLY JSON: {"dates":[{"date":"YYYY-MM-DD","endDate":"YYYY-MM-DD or empty","name":"...","category":"...","entity":"...","sourceUrl":"...","confidence":"high|medium|low","internal":false,'
     + '"where":"city or empty","when":"usual timing or empty","message":"...","headline":"...","subline":"..."}],"unknown":["names listed in the source for which no date could be found"]}\n\n' + material;
   const out = await claude(db, prompt, false, pdfs);
-  return { id: src.id, dates: cleanDates(out.dates, start, end, src.id), pages: pages.length, unknown: (Array.isArray(out.unknown) ? out.unknown : []).filter(Boolean).map((u) => String(u).slice(0, 80)).slice(0, 30) };
+  // every date takes the type of the source it came from, so the calendar matches the Data sources page
+  const kind = SOURCE_TYPE_CAT[src.type] || "industry";
+  return { id: src.id, dates: cleanDates(out.dates, start, end, src.id, kind, [kind]), pages: pages.length, unknown: (Array.isArray(out.unknown) ? out.unknown : []).filter(Boolean).map((u) => String(u).slice(0, 80)).slice(0, 30) };
 }
 
 // Further key-date categories that fit this brand's field, each with its dates.

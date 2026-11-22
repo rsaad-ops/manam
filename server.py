@@ -67,7 +67,7 @@ DEFAULT_DB = {
         "holidayRegions": {"federal": True, "quebec": False, "provincial": False},
         "defaultTime": "09:00",
         "publicMediaUrl": "",
-        "keyDates": {"cats": {"canada": True, "us": True, "awareness": True, "industry": True,
+        "keyDates": {"cats": {"canada": True, "us": True, "industry": True,
                               "tradeshow": True, "publication": True},
                      "custom": [], "overrides": {}},
         "sources": [],
@@ -594,7 +594,8 @@ def suggest_key_dates(req):
 
 SOURCE_TYPES = {"publications": "Industry publications", "tradeshows": "Trade shows",
                 "associations": "Industry associations", "other": "Other sources"}
-SOURCE_CATS = ("tradeshow", "publication", "association", "industry", "awareness")
+SOURCE_CATS = ("tradeshow", "publication", "association", "industry")
+SOURCE_TYPE_CAT = {"tradeshows": "tradeshow", "publications": "publication", "associations": "association", "other": "industry"}
 EVENT_LINK = re.compile(r"event|calendar|agenda|conference|congress|summit|show|expo|editorial|media-?kit|deadline|webinar|award"
                         r"|schedule|dates|evenement|calendrier|salon", re.I)
 PRIVATE_HOST = re.compile(r"^(localhost$|.*\.local$|.*\.internal$|127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|0\.|::1$)", re.I)
@@ -816,9 +817,7 @@ def scan_source(req):
         "Brand: %s (%s). Field: %s. Today is %s.\n"
         "The brand supplied a data source of type '%s'. Its content, and the web pages it points to, follow below%s.\n"
         "Task: list every dated event between %s and %s that belongs on the brand's social media calendar.\n"
-        "category is one of: 'tradeshow' (trade shows, expos), 'publication' (issue dates, editorial and advertising deadlines, report releases), "
-        "'association' (association events, conferences, awareness days and weeks), "
-        "'industry' (other conferences and sector deadlines), 'awareness'.\n%s"
+        "%s"
         "internal is true for editorial, advertising and submission deadlines: these are reminders for the team, never posts. Leave out events organised by competitors.\n"
         "message: for a public item, a short publishable key message in the brand's voice; for an internal item, a one-line reminder for the team.\n"
         "entity is the publication, show or association the item belongs to. sourceUrl is the page the date came from, or empty.\n"
@@ -830,7 +829,9 @@ def scan_source(req):
          SOURCE_TYPES.get(src.get("type"), "Other sources"), " (the attached PDF is part of the source)" if pdfs else "",
          start, end, DATE_RULES, json.dumps(known, ensure_ascii=False), material)
     out = claude(prompt, with_guidelines=False, docs=pdfs)
-    return {"id": src["id"], "dates": clean_dates(out.get("dates"), start, end, src["id"]), "pages": len(pages),
+    # every date takes the type of the source it came from, so the calendar matches the Data sources page
+    kind = SOURCE_TYPE_CAT.get(src.get("type"), "industry")
+    return {"id": src["id"], "dates": clean_dates(out.get("dates"), start, end, src["id"], kind, (kind,)), "pages": len(pages),
             "unknown": [str(u)[:80] for u in (out.get("unknown") or []) if u][:30]}
 
 

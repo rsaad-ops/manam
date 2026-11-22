@@ -10,14 +10,13 @@ import { openComposer } from './composer.js';
 const BASE_CATS = {
   canada: { label: 'Canadian holidays', color: '#EEB21E' },
   us: { label: 'US holidays', color: '#C93838' },
-  awareness: { label: 'Awareness & business days', color: '#1E8E5A' },
-  industry: { label: 'Industry events', color: '#3B5BDB' },
   tradeshow: { label: 'Trade shows', color: '#7A3FC4' },
-  publication: { label: 'Publications & reports', color: '#0E8FA3' },
+  publication: { label: 'Industry publications', color: '#0E8FA3' },
   association: { label: 'Industry associations', color: '#B4531A' },
+  industry: { label: 'Other sources', color: '#3B5BDB' },
   custom: { label: 'Your own dates', color: '#D6336C' },
 };
-const CAT_DEFAULT = { canada: true, us: true, awareness: true, industry: true, tradeshow: true, publication: true, association: true, custom: true };
+const CAT_DEFAULT = { canada: true, us: true, industry: true, tradeshow: true, publication: true, association: true, custom: true };
 export const PALETTE = ['#0B7285', '#9C36B5', '#E8590C', '#2B8A3E', '#C2255C', '#364FC7', '#866118', '#087F5B'];
 
 // Built-in categories plus the ones added by hand for this brand.
@@ -121,7 +120,7 @@ export function keyDateMap(from, to) {
 }
 
 // ------------------------------------------------------------------ visuals
-const LAYOUTS = { awareness: ['bold', 'quote', 'split'], industry: ['split', 'bold', 'quote'], tradeshow: ['photo', 'split', 'bold'], publication: ['quote', 'bold', 'split'], association: ['split', 'quote', 'bold'] };
+const LAYOUTS = { industry: ['split', 'bold', 'quote'], tradeshow: ['photo', 'split', 'bold'], publication: ['quote', 'bold', 'split'], association: ['split', 'quote', 'bold'] };
 export function specFor(it, i = 0, v = 0) {
   const pool = photos(), festive = ['canada', 'us'].includes(it.cat);
   let template = festive ? (it.solemn || v % 2 ? 'bold' : 'festive') : it.solemn ? 'bold' : (LAYOUTS[it.cat] || ['bold', 'split', 'quote'])[v % 3];

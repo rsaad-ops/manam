@@ -16,7 +16,7 @@ Nothing to install: it uses the Python that ships with macOS. Keep the window op
 
 ## Key dates
 
-On the Calendar, **★ Key dates** suggests moments to post about for your industry: Canadian and US holidays, awareness and business days, industry events, trade shows, and publications. Each comes with a proposed message and visual. Click a category to show or hide it, on the list and on the calendar.
+On the Calendar, **★ Key dates** lists the moments to post about, each with a proposed message and visual. Only Canadian and US holidays are built in. The other date types match the Data sources page: Trade shows, Industry publications, Industry associations and Other sources, plus Your own dates for dates typed in by hand. Click a type to show or hide it, on the list and on the calendar.
 Dates marked **Confirm date** (shown with ≈ on the calendar) are estimated from an event's usual timing; set the exact date before you post.
 
 Every type of date has its own colour and label. Click a type in the calendar legend, or in Key dates, to show or hide it; *Select all* and *Clear all* do it in one click. Under **Categories for your industry** you can add your own types, or have the assistant propose some with their dates (needs an AI key).
@@ -32,7 +32,7 @@ Proposed dates wait in **Dates to review**: correct, accept or reject each one. 
 
 ## Suggested posts
 
-For every key date in the next two months, the app adds a suggested post to the calendar (dashed outline, ✦), written for the type of date: a greeting for a holiday; before, opening-day and after posts for a trade show; one post for an awareness day, event or publication. Tick *We are attending* on a trade show for "meet us there" wording.
+For every key date in the next two months, the app adds a suggested post to the calendar (dashed outline, ✦), written for the type of date: a greeting for a holiday; before, opening-day and after posts for a trade show; one post for a publication, association or other date. Tick *We are attending* on a trade show for "meet us there" wording.
 Nothing is scheduled until you approve it. Under **Posts → Suggested** you can approve, edit, regenerate or dismiss each one, or approve a whole month. Dismissed suggestions do not come back. Switch the feature off in Key dates.
 
 ## Online version (Netlify)

@@ -12,7 +12,7 @@ const addDays = (iso, n) => { const d = new Date(iso + 'T12:00'); d.setDate(d.ge
 const PHASE = { before: 'One week before', day: '', after: 'After the show' };
 
 // What to post about a date, by its type. A trade show gets three posts: before, opening day and after.
-// Holidays get a greeting; awareness days, events, publications and associations get one post on the day.
+// Holidays get a greeting; publication, association and other dates get one post on the day.
 function phases(it, v = 0) {
   const year = it.date.slice(0, 4), B = S.data.brand.name || 'our team';
   if (it.cat !== 'tradeshow') {
